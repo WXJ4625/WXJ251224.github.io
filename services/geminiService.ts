@@ -99,8 +99,18 @@ export const generateStoryboards = async (
   const model = 'gemini-3-pro-preview';
 
   const systemInstruction = language === 'zh' 
-    ? `你是一个专业的产品分镜策划师。你擅长根据产品细节，在指定的${sceneType}场景下生成电影级、高凝聚力的3x3网格分镜提示词。`
-    : `You are a professional product storyboard planner. You excel at generating cinematic, highly cohesive 3x3 grid storyboard prompts under the specified ${sceneType} scene setting.`;
+    ? `你是一个专业的产品分镜策划师。你擅长根据产品细节，在指定的${sceneType}场景下生成电影级、高凝聚力的3x3网格分镜提示词。
+       重要指令：如果分镜中涉及模特/人物与产品的互动，你必须在每个分镜中详细描述互动细节，包括：
+       1. 模特的肢体动作（如：手指轻扣、掌心承托、双臂环抱、侧脸贴近）。
+       2. 具体的接触点（如：指尖触碰开关、虎口握住手柄、肩膀靠在产品边缘）。
+       3. 互动的具体方向和力度感（如：斜向上方的眼神交流、轻轻按压、向内收紧）。
+       这些细节必须明确以确保AI生成时的物理一致性。`
+    : `You are a professional product storyboard planner. You excel at generating cinematic, highly cohesive 3x3 grid storyboard prompts under the specified ${sceneType} scene setting.
+       CRITICAL INSTRUCTION: If models/humans interact with the product, you MUST detail the interaction in each shot:
+       1. Specific gestures (e.g., fingertips tapping, palms cradling, arms embracing, cheek leaning).
+       2. Specific contact points (e.g., fingertip touching the switch, palm-grip on handle, shoulder leaning on product edge).
+       3. Direction and sense of force (e.g., looking diagonally upwards, gentle pressing, tightening inwards).
+       These details must be explicit to ensure physical consistency in AI generation.`;
 
   const templatePrompt = `
     产品核心参数:
@@ -114,15 +124,15 @@ export const generateStoryboards = async (
 
     格式规范 (请直接按此输出内容)：
     根据[${profile.details}>kx]，生成一张具有凝聚力的[3x3]网格图像，包含在同一环境中的[9]个不同摄像镜头，产品内外部结构完全一致，首尾镜头主体完全一致，严格保持人物/物体、服装和光线的一致性，[8K]分辨率，[16:9]画幅。
-    镜头01: [广角镜头，展示产品在 ${sceneType} 场景中的整体状态]
+    镜头01: [广角镜头，展示产品在 ${sceneType} 场景中的整体状态，以及模特的基本交互姿态]
     镜头02: [特写镜头，强调产品独特细节：${profile.details.slice(0, 30)}...]
-    镜头03: [动作镜头，展示 ${profile.howToUse.slice(0, 30)}... 过程中的瞬间]
+    镜头03: [动作镜头，详细描述模特动作：展示 ${profile.howToUse.slice(0, 30)}... 过程中的指尖力度与产品互动]
     镜头04: [结构镜头，展示产品内部或关键构造部件]
-    镜头05: [创意视角，通过动感光影体现产品高级感]
-    镜头06: [动作镜头，延续展示产品的功能特性]
-    镜头07: [极近微距，捕捉品牌标识或精细材质纹理]
-    镜头08: [生活化叙事镜头，展示产品在真实 ${sceneType} 中的应用]
-    镜头09: [最终英雄镜头，与镜头01呼应，展示产品全貌]
+    镜头05: [创意视角，通过动感光影体现产品高级感，描述模特侧脸与光线的交汇]
+    镜头06: [动作镜头，延续展示产品的功能特性，明确手部与产品的接触方向]
+    镜头07: [极近微距，捕捉品牌标识或精细材质纹理，伴随模特皮肤质感的对比]
+    镜头08: [生活化叙事镜头，展示产品在真实 ${sceneType} 中的应用，包含模特的自然肢体舒展]
+    镜头09: [最终英雄镜头，与镜头01呼应，展示产品全貌及模特自信的掌控感]
 
     输出语言：${language === 'zh' ? '中文' : '英文'}。
     请返回一个 JSON 字符串数组。
@@ -150,7 +160,6 @@ export const generateStoryboards = async (
 export const generateStoryboardImage = async (prompt: string, referenceImageBase64: string): Promise<string> => {
   const ai = new GoogleGenAI({ apiKey: process.env.API_KEY as string });
   
-  // 将第一张上传的图片作为视觉参考传给模型
   const imagePart = {
     inlineData: {
       data: referenceImageBase64.split(',')[1],
@@ -163,7 +172,9 @@ export const generateStoryboardImage = async (prompt: string, referenceImageBase
     contents: { 
       parts: [
         imagePart, 
-        { text: `Based on the provided reference image's product structure, material, and details, generate a professional 3x3 storyboard grid image as described in this prompt: ${prompt}. Maintain 100% structural consistency for the product across all 9 lenses.` }
+        { text: `Based on the provided reference image's product structure, material, and details, generate a professional 3x3 storyboard grid image. 
+        PROMPT: ${prompt}. 
+        STRICT REQUIREMENT: Maintain 100% structural consistency for the product and precise human-product interaction as described.` }
       ] 
     },
     config: {
@@ -201,7 +212,7 @@ export const generateVideo = async (
 
   let operation = await ai.models.generateVideos({
     model: 'veo-3.1-fast-generate-preview',
-    prompt: `Smooth cinematic commercial, high end production value. Product motion: stable, fluid transitions. Consistent with provided reference structure. Lighting: professional. ${prompt}`,
+    prompt: `Smooth cinematic commercial, high end production value. Cinematic interaction with the product. Realistic motion. Consistent with reference. ${prompt}`,
     image: {
       imageBytes: rawData,
       mimeType: 'image/png',
@@ -213,7 +224,7 @@ export const generateVideo = async (
     }
   });
 
-  onStatusChange?.("视频生成中，正在为您渲染 10-15s 高清镜头...");
+  onStatusChange?.("视频生成中...");
 
   while (!operation.done) {
     await new Promise(resolve => setTimeout(resolve, 10000));
@@ -230,7 +241,7 @@ export const generateVideo = async (
   const downloadLink = operation.response?.generatedVideos?.[0]?.video?.uri;
   if (!downloadLink) throw new Error("Video generation failed.");
 
-  onStatusChange?.("正在同步云端媒体流...");
+  onStatusChange?.("同步中...");
   const response = await fetch(`${downloadLink}&key=${process.env.API_KEY}`);
   const blob = await response.blob();
   return URL.createObjectURL(blob);
