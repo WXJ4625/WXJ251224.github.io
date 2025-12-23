@@ -17,7 +17,10 @@ import {
   Check, 
   Sparkles,
   ChevronRight,
-  Info
+  Info,
+  // Fix: Added missing icons
+  Edit3,
+  LayoutGrid
 } from 'lucide-react';
 import { AppState, ProductAnalysis, IndividualAnalysis, SceneType } from './types';
 import { analyzeIndividualImages, synthesizeProductProfile, generateStoryboards, generateStoryboardImage } from './services/geminiService';
@@ -35,6 +38,13 @@ const App: React.FC = () => {
   const [selectedPromptIndex, setSelectedPromptIndex] = useState<number>(0);
   const [finalImage, setFinalImage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  // Fix: Added missing copyToClipboard function
+  const copyToClipboard = (text: string) => {
+    navigator.clipboard.writeText(text).catch(err => {
+      console.error('Failed to copy text: ', err);
+    });
+  };
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files || []);
