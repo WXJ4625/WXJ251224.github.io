@@ -145,13 +145,27 @@ export const generateStoryboards = async (
 };
 
 /**
- * 生成 9 宫格图片
+ * 生成 9 宫格图片 (引入参考图以锁定产品结构)
  */
-export const generateStoryboardImage = async (prompt: string): Promise<string> => {
+export const generateStoryboardImage = async (prompt: string, referenceImageBase64: string): Promise<string> => {
   const ai = new GoogleGenAI({ apiKey: process.env.API_KEY as string });
+  
+  // 将第一张上传的图片作为视觉参考传给模型
+  const imagePart = {
+    inlineData: {
+      data: referenceImageBase64.split(',')[1],
+      mimeType: 'image/jpeg'
+    }
+  };
+
   const response = await ai.models.generateContent({
     model: 'gemini-2.5-flash-image',
-    contents: { parts: [{ text: prompt }] },
+    contents: { 
+      parts: [
+        imagePart, 
+        { text: `Based on the provided reference image's product structure, material, and details, generate a professional 3x3 storyboard grid image as described in this prompt: ${prompt}. Maintain 100% structural consistency for the product across all 9 lenses.` }
+      ] 
+    },
     config: {
       imageConfig: {
         aspectRatio: "16:9"
@@ -183,12 +197,11 @@ export const generateVideo = async (
   
   onStatusChange?.("正在初始化 Veo 视频生成引擎...");
   
-  // Clean base64 for image parameter
   const rawData = base64Image.split(',')[1];
 
   let operation = await ai.models.generateVideos({
     model: 'veo-3.1-fast-generate-preview',
-    prompt: `A smooth cinematic commercial video for a product. ${prompt}. High quality, professional lighting, 16:9 aspect ratio, consistent product structure, stable motion.`,
+    prompt: `Smooth cinematic commercial, high end production value. Product motion: stable, fluid transitions. Consistent with provided reference structure. Lighting: professional. ${prompt}`,
     image: {
       imageBytes: rawData,
       mimeType: 'image/png',
@@ -200,7 +213,7 @@ export const generateVideo = async (
     }
   });
 
-  onStatusChange?.("视频生成中，这通常需要 2-5 分钟，请稍候...");
+  onStatusChange?.("视频生成中，正在为您渲染 10-15s 高清镜头...");
 
   while (!operation.done) {
     await new Promise(resolve => setTimeout(resolve, 10000));
@@ -215,9 +228,9 @@ export const generateVideo = async (
   }
 
   const downloadLink = operation.response?.generatedVideos?.[0]?.video?.uri;
-  if (!downloadLink) throw new Error("Video generation failed to return a link.");
+  if (!downloadLink) throw new Error("Video generation failed.");
 
-  onStatusChange?.("正在从云端下载并编码视频数据...");
+  onStatusChange?.("正在同步云端媒体流...");
   const response = await fetch(`${downloadLink}&key=${process.env.API_KEY}`);
   const blob = await response.blob();
   return URL.createObjectURL(blob);
