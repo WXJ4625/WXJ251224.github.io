@@ -4,6 +4,11 @@ export interface IndividualAnalysis {
   description: string;
 }
 
+export interface VideoResult {
+  url: string;
+  id: string;
+}
+
 export interface ProductAnalysis {
   individualAnalyses: IndividualAnalysis[];
   globalProfile: {
@@ -23,5 +28,6 @@ export enum AppState {
   EDITING_GLOBAL = 'EDITING_GLOBAL',
   GENERATING_PROMPTS = 'GENERATING_PROMPTS',
   GENERATING_IMAGE = 'GENERATING_IMAGE',
+  GENERATING_VIDEO = 'GENERATING_VIDEO',
   COMPLETED = 'COMPLETED'
 }
