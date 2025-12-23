@@ -1,32 +1,70 @@
 
 import { GoogleGenAI, Type, GenerateContentResponse } from "@google/genai";
-import { ProductAnalysis, SceneType } from "../types";
+import { ProductAnalysis, IndividualAnalysis, SceneType } from "../types";
 
 /**
- * Service to handle product analysis using Gemini 3 Flash.
- * Always initializes a fresh GoogleGenAI instance using process.env.API_KEY directly.
+ * 分析每一张参考图的具体内容
  */
-export const analyzeProduct = async (images: string[]): Promise<ProductAnalysis> => {
+export const analyzeIndividualImages = async (images: {id: string, data: string}[]): Promise<IndividualAnalysis[]> => {
   const ai = new GoogleGenAI({ apiKey: process.env.API_KEY as string });
   const model = 'gemini-3-flash-preview';
 
-  const imageParts = images.map(img => ({
-    inlineData: {
-      data: img.split(',')[1],
-      mimeType: 'image/jpeg'
-    }
-  }));
+  const results: IndividualAnalysis[] = [];
 
-  const prompt = `Analyze this product from the images provided. Provide the details in three categories:
-  1. Product Details (Appearance, branding, material, unique features)
-  2. Product Purpose (What is it for? Target audience?)
-  3. How to use (Brief step-by-step instructions)
+  for (const img of images) {
+    const imagePart = {
+      inlineData: {
+        data: img.data.split(',')[1],
+        mimeType: 'image/jpeg'
+      }
+    };
+
+    const prompt = `请分析这张参考图。描述图中展示的产品具体部位、环境、光影以及它传达的视觉信息。
+    输出格式为 JSON: { "description": "..." }`;
+
+    const response = await ai.models.generateContent({
+      model,
+      contents: { parts: [imagePart, { text: prompt }] },
+      config: {
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            description: { type: Type.STRING }
+          },
+          required: ["description"]
+        }
+      }
+    });
+
+    const parsed = JSON.parse(response.text || '{"description": "无法识别"}');
+    results.push({ id: img.id, description: parsed.description });
+  }
+
+  return results;
+};
+
+/**
+ * 综合所有参考图分析，推导出全局产品属性
+ */
+export const synthesizeProductProfile = async (individualAnalyses: IndividualAnalysis[]): Promise<ProductAnalysis['globalProfile']> => {
+  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY as string });
+  const model = 'gemini-3-flash-preview';
+
+  const context = individualAnalyses.map((a, i) => `参考图 ${i+1} 分析: ${a.description}`).join('\n');
+  const prompt = `基于以下对多张产品参考图的独立分析，请综合推导出一个完整的产品档案：
+  ${context}
   
-  Return the response in JSON format.`;
+  请按以下维度输出（用于分镜策划）：
+  1. 产品细节 (Details): 综合外观特征、品牌、材质。
+  2. 产品用途 (Usage): 核心受众、适用场景。
+  3. 使用演示 (HowToUse): 核心操作或演示逻辑。
+  
+  输出格式为 JSON。`;
 
   const response = await ai.models.generateContent({
     model,
-    contents: { parts: [...imageParts, { text: prompt }] },
+    contents: prompt,
     config: {
       responseMimeType: "application/json",
       responseSchema: {
@@ -41,14 +79,14 @@ export const analyzeProduct = async (images: string[]): Promise<ProductAnalysis>
     }
   });
 
-  return JSON.parse(response.text || '{}') as ProductAnalysis;
+  return JSON.parse(response.text || '{}') as ProductAnalysis['globalProfile'];
 };
 
 /**
- * Service to generate storyboard prompts using Gemini 3 Pro.
+ * 根据综合档案生成多套分镜建议
  */
 export const generateStoryboards = async (
-  analysis: ProductAnalysis, 
+  profile: ProductAnalysis['globalProfile'], 
   quantity: number, 
   language: 'zh' | 'en',
   sceneType: SceneType
@@ -61,25 +99,27 @@ export const generateStoryboards = async (
     : `You are a professional product storyboard planner. You excel at generating cinematic, highly cohesive 3x3 grid storyboard prompts under the specified ${sceneType} scene setting.`;
 
   const templatePrompt = `
-    Product Context: ${JSON.stringify(analysis)}
-    Scene Type: ${sceneType}
-    Language: ${language === 'zh' ? 'Chinese' : 'English'}
+    参考背景:
+    - 细节: ${profile.details}
+    - 用途: ${profile.usage}
+    - 演示: ${profile.howToUse}
+    - 场景类型: ${sceneType}
     
-    Task: Generate ${quantity} unique prompt variations. Each variation MUST strictly follow this exact template:
+    任务：生成 ${quantity} 份独特的分镜方案。每份方案必须严格遵守以下格式：
 
-    根据[${analysis.details}>kx]，生成一张具有凝聚力的[3x3]网格图像，包含在同一环境中的[9]个不同摄像镜头，产品内外部结构完全一致，首尾镜头主体完全一致，严格保持人物/物体、服装和光线的一致性，[8K]分辨率，[16:9]画幅。
-    镜头01: [Description of a wide establishing shot of the product in the ${sceneType} environment]
-    镜头02: [Description of a close-up of a specific product detail]
-    镜头03: [Description of the product being handled or in use]
-    镜头04: [Description of an internal view or exploded view of product structure]
-    镜头05: [Description of a creative angle or dynamic lighting shot]
-    镜头06: [Description of another usage step]
-    镜头07: [Description of a macro shot of material texture or branding]
-    镜头08: [Description of the product in its context/environment]
-    镜头09: [Description of a final hero shot matching the scale/subject of Lens 01]
+    根据[${profile.details}>kx]，生成一张具有凝聚力的[3x3]网格图像，包含在同一环境中的[9]个不同摄像镜头，产品内外部结构完全一致，首尾镜头主体完全一致，严格保持人物/物体、服装和光线的一致性，[8K]分辨率，[16:9]画幅。
+    镜头01: [广角镜头，展示产品在 ${sceneType} 场景中的整体状态]
+    镜头02: [特写镜头，展示产品核心卖点细节]
+    镜头03: [动作镜头，展示 ${profile.howToUse} 中的关键一步]
+    镜头04: [结构镜头，展示内部结构或材质质感]
+    镜头05: [创意视角或动感光影效果]
+    镜头06: [动作镜头，展示产品使用的延续动作]
+    镜头07: [微距镜头，展示Logo或精细纹理]
+    镜头08: [环境叙事镜头，体现 ${profile.usage} 中的生活化场景]
+    镜头09: [最终英雄镜头，与镜头01呼应，强化品牌感]
 
-    Note: The descriptions must be in ${language === 'zh' ? 'Chinese' : 'English'}.
-    Return a JSON array of strings.
+    输出语言：${language === 'zh' ? '中文' : '英文'}。
+    请返回一个 JSON 字符串数组。
   `;
 
   const response = await ai.models.generateContent({
@@ -99,11 +139,10 @@ export const generateStoryboards = async (
 };
 
 /**
- * Service to generate images using Gemini 2.5 Flash Image (Free Tier).
+ * 生成 9 宫格图片
  */
 export const generateStoryboardImage = async (prompt: string): Promise<string> => {
   const ai = new GoogleGenAI({ apiKey: process.env.API_KEY as string });
-  // Switched to gemini-2.5-flash-image for free usage without mandatory key selection
   const response = await ai.models.generateContent({
     model: 'gemini-2.5-flash-image',
     contents: { parts: [{ text: prompt }] },
