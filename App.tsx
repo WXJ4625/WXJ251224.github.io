@@ -81,11 +81,13 @@ const App: React.FC = () => {
       id: Math.random().toString(36).substr(2, 9),
       timestamp: Date.now(),
       productName: productName || '未命名产品',
+      // Store all images to allow full modification
       referenceImage: images.find(i => i.type === 'image')?.data || images[0]?.data || '',
       prompts,
       analysis: currentAnalysis
     };
-    const updatedHistory = [newRecord, ...history].slice(0, 50); // Keep last 50
+    // Prepend and limit to 50
+    const updatedHistory = [newRecord, ...history].slice(0, 50);
     setHistory(updatedHistory);
     localStorage.setItem('storyboard_history', JSON.stringify(updatedHistory));
   };
@@ -94,15 +96,18 @@ const App: React.FC = () => {
     setProductName(record.productName);
     setAnalysis(record.analysis);
     setGeneratedPrompts(record.prompts);
-    setImages([{ id: 'ref-historical', data: record.referenceImage, type: 'image' }]);
+    // Restore images (historical records might only save the main thumb, but here we restore what we have)
+    setImages([{ id: 'ref-historical-' + Date.now(), data: record.referenceImage, type: 'image' }]);
     setRenderedImages({});
     setState(AppState.COMPLETED);
     setShowHistory(false);
   };
 
   const clearHistory = () => {
-    setHistory([]);
-    localStorage.removeItem('storyboard_history');
+    if (window.confirm("确定要清空所有生成记录吗？")) {
+      setHistory([]);
+      localStorage.removeItem('storyboard_history');
+    }
   };
 
   const copyToClipboard = (text: string, key: string) => {
@@ -137,11 +142,11 @@ const App: React.FC = () => {
 
   const startIndividualAnalysis = async () => {
     if (images.length === 0) {
-      setError("请至少上传一张产品图片作为参考。");
+      setError("请至少上传一张参考图或视频。");
       return;
     }
     if (!productName.trim()) {
-      setError("请输入产品名称。");
+      setError("请输入产品名称以便于溯源记录。");
       return;
     }
     setState(AppState.ANALYZING_INDIVIDUAL);
@@ -154,7 +159,7 @@ const App: React.FC = () => {
       });
       setState(AppState.EDITING_INDIVIDUAL);
     } catch (err: any) {
-      setError("分析失败，请检查网络。");
+      setError("分析失败，请检查网络或 API Key。");
       setState(AppState.IDLE);
     }
   };
@@ -167,7 +172,7 @@ const App: React.FC = () => {
       setAnalysis({ ...analysis, globalProfile: profile });
       setState(AppState.EDITING_GLOBAL);
     } catch (err) {
-      setError("综合失败。");
+      setError("综合档案失败。");
       setState(AppState.EDITING_INDIVIDUAL);
     }
   };
@@ -194,7 +199,7 @@ const App: React.FC = () => {
       saveToHistory(parsed, analysis);
       setState(AppState.COMPLETED);
     } catch (err) {
-      setError("生成失败。");
+      setError("提示词生产失败。");
       setState(AppState.EDITING_GLOBAL);
     }
   };
@@ -226,7 +231,7 @@ const App: React.FC = () => {
       setRenderedImages(prev => ({ ...prev, [index]: img }));
       setState(AppState.COMPLETED);
     } catch (err: any) {
-      setError(`分镜 ${index + 1} 渲染失败。`);
+      setError(`渲染方案 ${index + 1} 失败。`);
       setState(AppState.COMPLETED);
     }
   };
@@ -257,24 +262,26 @@ const App: React.FC = () => {
       const idx = parseInt(key);
       const link = document.createElement('a');
       link.href = renderedImages[idx];
-      link.download = `${idx + 1}.png`; 
+      link.download = `${idx + 1}.png`; // Requested: named as prompt index
       link.click();
     });
   };
 
   const getSerialID = (index: number) => {
     const date = new Date();
-    const YYYYMMDD = date.toISOString().split('T')[0].replace(/-/g, '');
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    const YYYYMMDD = `${year}${month}${day}`;
     const seq = (index + 1).toString().padStart(3, '0');
-    return `${productName || '未命名'}-${YYYYMMDD}${seq}`;
+    return `${productName || '产品'}-${YYYYMMDD}${seq}`;
   };
 
   const downloadPromptsAsCSV = () => {
     if (generatedPrompts.length === 0) return;
-    const headers = ['编号', '序号标识(产品名称-年月日序号)', '全局指令', '镜头01', '镜头02', '镜头03', '镜头04', '镜头05', '镜头06', '镜头07', '镜头08', '镜头09'];
+    const headers = ['产品名称-年月日序号', '全局指令', '镜头01', '镜头02', '镜头03', '镜头04', '镜头05', '镜头06', '镜头07', '镜头08', '镜头09'];
     const rows = generatedPrompts.map((p, index) => {
       return [
-        (index + 1).toString(),
         getSerialID(index),
         p.instruction,
         ...p.shots
@@ -285,7 +292,7 @@ const App: React.FC = () => {
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
-    link.download = `storyboard_prompts_${productName}_${new Date().getTime()}.csv`;
+    link.download = `storyboard_${productName}_${new Date().getTime()}.csv`;
     link.click();
   };
 
@@ -352,25 +359,25 @@ const App: React.FC = () => {
              <Sparkles className="text-white w-8 h-8" />
              <h1 className="text-3xl font-black text-white tracking-tighter uppercase italic">Storyboard Factory</h1>
           </div>
-          <p className="text-slate-400 text-lg font-medium tracking-tight">垂直极速分镜策划 • 历史溯源修改 • 结构锁定渲染</p>
+          <p className="text-slate-400 text-lg font-medium tracking-tight">AI 结构锁定分镜产线 • 历史回溯修改 • 全自动渲染</p>
         </div>
         <div className="flex items-center gap-4">
           <button onClick={() => setShowHistory(true)} className="px-8 py-4 bg-slate-100 rounded-2xl font-black text-sm flex items-center gap-3 hover:bg-slate-200 transition-all border border-slate-200">
-            <History className="w-5 h-5" /> 生成历史记录
+            <History className="w-5 h-5" /> 历史记录查看
           </button>
           <button onClick={async () => { /* @ts-ignore */ await window.aistudio.openSelectKey(); }} className="px-8 py-4 bg-black text-white rounded-2xl font-black text-sm hover:scale-105 transition-all shadow-xl">鉴权中心</button>
         </div>
       </header>
 
-      {/* STEP 1: UPLOAD AREA */}
+      {/* STEP 1: UPLOAD & PRODUCT NAME */}
       <section className="bg-slate-50 p-12 rounded-[3.5rem] border border-slate-100 shadow-sm w-full">
         <div className="flex flex-col md:flex-row md:items-center justify-between mb-12 gap-6">
           <div className="flex items-center gap-6">
             <span className="w-16 h-16 rounded-[2rem] bg-black text-white flex items-center justify-center text-2xl font-black">01</span>
-            <h2 className="text-4xl font-black">参考资料上传</h2>
+            <h2 className="text-4xl font-black">产品档案资产上传</h2>
           </div>
           <div className="px-6 py-3 bg-white rounded-2xl border border-slate-200 text-slate-500 font-bold text-sm">
-            首张图为结构锁定的核心源
+            首张图为结构锁定核心源 (支持视频解析)
           </div>
         </div>
 
@@ -385,7 +392,7 @@ const App: React.FC = () => {
                 <img src={img.data} className="w-full h-full object-cover" />
               )}
               <div className="absolute inset-x-0 bottom-0 p-4 bg-gradient-to-t from-black/80 to-transparent">
-                <span className="text-white font-black text-[10px] tracking-widest uppercase">{i === 0 ? '结构核心' : img.type === 'video' ? '参考视频' : '参考视角'}</span>
+                <span className="text-white font-black text-[10px] tracking-widest uppercase">{i === 0 ? '结构源' : img.type === 'video' ? '视频参考' : '视角参考'}</span>
               </div>
               <button onClick={() => removeImage(img.id)} className="absolute top-2 right-2 bg-red-500 text-white p-2 rounded-xl">
                 <Trash2 className="w-4 h-4" />
@@ -408,9 +415,9 @@ const App: React.FC = () => {
           )}
         </div>
 
-        {/* PRODUCT NAME INPUT MOVED HERE */}
+        {/* Product Name Below Upload Area */}
         <div className="mb-12">
-          <label className="text-xs font-black uppercase tracking-[0.2em] text-slate-400 mb-4 block">产品名称</label>
+          <label className="text-xs font-black uppercase tracking-[0.2em] text-slate-400 mb-4 block">产品名称 (用于溯源修改与文件命名)</label>
           <input 
             type="text" 
             placeholder="请输入产品名称，如：扭腰机" 
@@ -425,7 +432,7 @@ const App: React.FC = () => {
           onClick={startIndividualAnalysis}
           className="w-full py-8 rounded-[2.5rem] bg-black text-white font-black text-2xl flex items-center justify-center gap-6 hover:scale-[1.005] active:scale-[0.98] transition-all shadow-2xl disabled:bg-slate-200 disabled:shadow-none"
         >
-          {state === AppState.ANALYZING_INDIVIDUAL ? <Loader2 className="w-10 h-10 animate-spin" /> : <><Search className="w-10 h-10" /> 深度扫描产线资产</>}
+          {state === AppState.ANALYZING_INDIVIDUAL ? <Loader2 className="w-10 h-10 animate-spin" /> : <><Search className="w-10 h-10" /> 启动资产深度解析</>}
         </button>
       </section>
 
@@ -434,7 +441,7 @@ const App: React.FC = () => {
         <section className="bg-slate-50 p-12 rounded-[3.5rem] border border-slate-100 animate-in slide-in-from-bottom-12 w-full">
           <div className="flex items-center gap-6 mb-12">
             <span className="w-16 h-16 rounded-[2rem] bg-indigo-600 text-white flex items-center justify-center text-2xl font-black">02</span>
-            <h2 className="text-4xl font-black">资产解析结果</h2>
+            <h2 className="text-4xl font-black">结构解析明细</h2>
           </div>
           <div className="space-y-8">
             {analysis.individualAnalyses.map((item, idx) => (
@@ -460,16 +467,16 @@ const App: React.FC = () => {
         </section>
       )}
 
-      {/* STORYBOARD CONFIG */}
+      {/* CONFIGURATION */}
       {analysis && (state === AppState.EDITING_GLOBAL || state === AppState.GENERATING_PROMPTS || state === AppState.COMPLETED) && (
         <section className="bg-slate-50 p-12 rounded-[3.5rem] border border-slate-100 animate-in slide-in-from-bottom-12 w-full">
           <div className="flex items-center gap-6 mb-12">
             <span className="w-16 h-16 rounded-[2rem] bg-emerald-600 text-white flex items-center justify-center text-2xl font-black">03</span>
-            <h2 className="text-4xl font-black">分镜产线配置</h2>
+            <h2 className="text-4xl font-black">策略生成配置</h2>
           </div>
           <div className="bg-white p-12 rounded-[3rem] shadow-sm mb-12 space-y-12">
             <div>
-              <label className="text-xs font-black uppercase tracking-[0.2em] text-slate-400 mb-6 block">产品结构与交互锁定</label>
+              <label className="text-xs font-black uppercase tracking-[0.2em] text-slate-400 mb-6 block">核心产品基因锁定 (可手动优化)</label>
               <textarea 
                 className="w-full p-8 text-2xl font-black bg-slate-50 border-0 rounded-[2rem] focus:ring-8 focus:ring-emerald-50 min-h-[140px]" 
                 value={analysis.globalProfile.details} 
@@ -478,7 +485,7 @@ const App: React.FC = () => {
             </div>
             <div className="flex flex-col xl:flex-row gap-12">
               <div className="flex-1 space-y-8">
-                <label className="text-xs font-black uppercase tracking-[0.2em] text-slate-400 block">商业场景定位</label>
+                <label className="text-xs font-black uppercase tracking-[0.2em] text-slate-400 block">商业叙事场景</label>
                 <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
                   {SCENE_OPTIONS.map(opt => (
                     <button key={opt} onClick={() => setSceneType(opt)} className={`py-6 px-4 rounded-3xl text-sm font-black border-4 transition-all ${sceneType === opt ? 'bg-emerald-600 border-emerald-600 text-white shadow-xl scale-105' : 'bg-white border-slate-100 text-slate-400 hover:border-emerald-200'}`}>{opt}</button>
@@ -486,7 +493,7 @@ const App: React.FC = () => {
                 </div>
               </div>
               <div className="flex-1 space-y-8">
-                <label className="text-xs font-black uppercase tracking-[0.2em] text-slate-400 block">生成份数 (1-50)</label>
+                <label className="text-xs font-black uppercase tracking-[0.2em] text-slate-400 block">批量产出份数 (1-50)</label>
                 <div className="flex flex-col sm:flex-row items-center gap-8">
                   <div className="flex bg-slate-100 p-2 rounded-[2rem] w-full">
                     <button onClick={() => setLanguage('zh')} className={`flex-1 py-4 text-sm font-black rounded-2xl ${language === 'zh' ? 'bg-white shadow-lg text-emerald-600' : 'text-slate-400'}`}>中文策划</button>
@@ -498,25 +505,25 @@ const App: React.FC = () => {
             </div>
           </div>
           <button onClick={startPromptGeneration} disabled={state === AppState.GENERATING_PROMPTS} className="w-full py-8 rounded-[2.5rem] bg-emerald-600 text-white font-black text-2xl flex items-center justify-center gap-6 hover:scale-[1.005] shadow-2xl transition-all">
-            {state === AppState.GENERATING_PROMPTS ? <Loader2 className="w-10 h-10 animate-spin" /> : <><Settings2 className="w-10 h-10" /> 立即启动分镜生产</>}
+            {state === AppState.GENERATING_PROMPTS ? <Loader2 className="w-10 h-10 animate-spin" /> : <><Settings2 className="w-10 h-10" /> 立即生产全套分镜提示词</>}
           </button>
         </section>
       )}
 
-      {/* FINAL OUTPUT AREA */}
+      {/* FINAL OUTPUT */}
       {generatedPrompts.length > 0 && (
         <section className="space-y-16 animate-in fade-in duration-1000 w-full">
           <div className="bg-black p-12 rounded-[4rem] text-white flex flex-col xl:flex-row items-center justify-between gap-12 shadow-2xl">
             <div className="space-y-4 text-center xl:text-left">
               <h2 className="text-4xl font-black flex items-center justify-center xl:justify-start gap-6">
                 <Package className="w-12 h-12 text-emerald-400" />
-                资产总览看板
+                分镜资产总览
               </h2>
-              <p className="text-slate-500 font-bold text-lg">产品：{productName} | 已生产 {generatedPrompts.length} 套方案</p>
+              <p className="text-slate-500 font-bold text-lg">产品：{productName} | 已生产 {generatedPrompts.length} 套独立分镜方案</p>
             </div>
             <div className="flex flex-wrap items-center justify-center gap-6">
               <button onClick={downloadPromptsAsCSV} className="px-10 py-5 bg-white text-black rounded-[2rem] font-black text-lg flex items-center gap-4 hover:scale-105 transition-all shadow-lg">
-                <FileDown className="w-6 h-6" /> 导出 CSV 表格
+                <FileDown className="w-6 h-6" /> 导出策划 CSV (含序号)
               </button>
               <button onClick={startGenerateAllImages} disabled={state === AppState.GENERATING_IMAGE} className="px-10 py-5 bg-emerald-500 text-black rounded-[2rem] font-black text-lg flex items-center gap-4 hover:scale-105 transition-all shadow-lg">
                 {batchProgress ? <><Loader2 className="w-6 h-6 animate-spin" /> {batchProgress.current}/{batchProgress.total}</> : <><Layers className="w-6 h-6" /> 一键渲染所有九宫格</>}
@@ -537,19 +544,19 @@ const App: React.FC = () => {
                     <span className="w-16 h-16 rounded-[2rem] bg-slate-900 text-white flex items-center justify-center text-2xl font-black">#{idx + 1}</span>
                     <div className="flex flex-col">
                        <h3 className="text-2xl font-black tracking-tight">{getSerialID(idx)}</h3>
-                       <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Storyboard Scheme</span>
+                       <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">分镜方案编号</span>
                     </div>
                   </div>
                   <div className="flex gap-4">
                     <button onClick={() => renderSingleImage(idx)} className="px-8 py-4 bg-black text-white rounded-2xl font-black text-xs hover:scale-105 transition-all flex items-center gap-3">
-                       {state === AppState.GENERATING_IMAGE ? <Loader2 className="w-4 h-4 animate-spin" /> : <><RefreshCw className="w-4 h-4" /> 渲染此方案</>}
+                       {state === AppState.GENERATING_IMAGE ? <Loader2 className="w-4 h-4 animate-spin" /> : <><RefreshCw className="w-4 h-4" /> 驱动渲染九宫格</>}
                     </button>
                   </div>
                 </div>
 
                 <div className="space-y-12 bg-slate-50 p-12 rounded-[3rem] border border-slate-100">
                   <div>
-                    <label className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400 mb-4 block">主指令内容</label>
+                    <label className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400 mb-4 block">主指令内容 (支持手动调优)</label>
                     <textarea 
                       className="w-full p-6 text-lg font-bold bg-white border-2 border-transparent rounded-3xl focus:border-emerald-500 outline-none resize-none leading-relaxed italic shadow-sm"
                       value={p.instruction}
@@ -562,7 +569,7 @@ const App: React.FC = () => {
                     {p.shots.map((shotContent, si) => (
                       <div key={si} className="bg-white p-8 rounded-3xl border border-slate-100 shadow-sm transition-all focus-within:border-emerald-500">
                         <div className="flex items-center justify-between mb-4">
-                          <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">分镜 0{si+1}</span>
+                          <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">镜头 0{si+1}</span>
                           <button onClick={() => copyToClipboard(shotContent, `shot-${idx}-${si}`)} className="p-1 text-slate-300 hover:text-emerald-500">
                              {copyStates[`shot-${idx}-${si}`] ? <Check className="w-3 h-3 text-emerald-500" /> : <Copy className="w-3 h-3" />}
                           </button>
@@ -581,13 +588,13 @@ const App: React.FC = () => {
                   {renderedImages[idx] && (
                     <div className="space-y-8">
                        <div className="flex items-center justify-between">
-                          <h4 className="text-sm font-black uppercase text-slate-400 tracking-widest">渲染预览</h4>
+                          <h4 className="text-sm font-black uppercase text-slate-400 tracking-widest">渲染结果预览</h4>
                           <div className="flex gap-4">
                              <button onClick={() => setZoomImage(renderedImages[idx])} className="px-4 py-2 bg-slate-100 rounded-xl text-[10px] font-black flex items-center gap-2 hover:bg-slate-200">
                                <Maximize2 className="w-3.5 h-3.5" /> 放大查看
                              </button>
                              <button onClick={() => splitImageIntoNine(renderedImages[idx], getSerialID(idx))} className="px-4 py-2 bg-emerald-50 text-emerald-600 rounded-xl text-[10px] font-black flex items-center gap-2 hover:bg-emerald-100">
-                               <Scissors className="w-3.5 h-3.5" /> 拆解小图
+                               <Scissors className="w-3.5 h-3.5" /> 智能拆解
                              </button>
                           </div>
                        </div>
@@ -599,9 +606,9 @@ const App: React.FC = () => {
                   {renderedImages[idx] && (
                     <div className="space-y-8">
                       <div className="flex items-center justify-between">
-                         <h4 className="text-sm font-black uppercase text-slate-400 tracking-widest">动态视频产出</h4>
+                         <h4 className="text-sm font-black uppercase text-slate-400 tracking-widest">同步视频资产</h4>
                          <button onClick={() => generateSingleVideo(idx)} disabled={state === AppState.GENERATING_VIDEO} className="px-6 py-2 bg-blue-600 text-white rounded-xl text-[10px] font-black hover:bg-blue-700">
-                           {state === AppState.GENERATING_VIDEO ? <Loader2 className="w-3 h-3 animate-spin" /> : '驱动 Veo 生成'}
+                           {state === AppState.GENERATING_VIDEO ? <Loader2 className="w-3 h-3 animate-spin" /> : '生成视频预览'}
                          </button>
                       </div>
                       <div className="grid grid-cols-1 gap-8">
@@ -621,7 +628,7 @@ const App: React.FC = () => {
         </section>
       )}
 
-      {/* ZOOM MODAL */}
+      {/* MODALS */}
       {zoomImage && (
         <div className="fixed inset-0 z-[110] flex items-center justify-center p-8 bg-black/95 backdrop-blur-xl animate-in fade-in duration-300">
            <button onClick={() => setZoomImage(null)} className="absolute top-8 right-8 text-white p-4 hover:bg-white/10 rounded-full transition-all">
@@ -631,7 +638,6 @@ const App: React.FC = () => {
         </div>
       )}
 
-      {/* HISTORY MODAL */}
       {showHistory && (
         <div className="fixed inset-0 z-[120] flex items-center justify-center p-6 bg-black/70 backdrop-blur-md animate-in fade-in">
            <div className="bg-white w-full max-w-4xl max-h-[85vh] rounded-[3.5rem] shadow-2xl overflow-hidden flex flex-col">
@@ -640,9 +646,9 @@ const App: React.FC = () => {
                    <div className="p-4 bg-indigo-600 rounded-2xl text-white">
                       <History className="w-8 h-8" />
                    </div>
-                   <h3 className="text-3xl font-black text-slate-900 tracking-tight">产品分镜历史库</h3>
+                   <h3 className="text-3xl font-black text-slate-900 tracking-tight">产品分镜溯源库</h3>
                  </div>
-                 <button onClick={() => setShowHistory(false)} className="p-4 bg-white border border-slate-200 rounded-2xl hover:bg-slate-50">
+                 <button onClick={() => setShowHistory(false)} className="p-4 bg-white border border-slate-200 rounded-2xl hover:bg-slate-50 transition-all">
                     <X className="w-6 h-6" />
                  </button>
               </div>
@@ -676,27 +682,27 @@ const App: React.FC = () => {
                  )}
               </div>
               <div className="p-10 border-t border-slate-100 flex justify-end gap-6 bg-slate-50">
-                 <button onClick={clearHistory} className="px-8 py-4 bg-red-50 text-red-600 rounded-2xl font-black text-xs hover:bg-red-100">清空所有记录</button>
+                 <button onClick={clearHistory} className="px-8 py-4 bg-red-50 text-red-600 rounded-2xl font-black text-xs hover:bg-red-100">清空历史记录</button>
               </div>
            </div>
         </div>
       )}
 
-      {/* STATUS FOOTER */}
+      {/* FOOTER */}
       <footer className="fixed bottom-0 left-0 right-0 bg-white/90 backdrop-blur-3xl border-t border-slate-200 py-6 px-12 flex items-center justify-between z-50">
         <div className="flex items-center gap-6">
           <div className={`w-3 h-3 rounded-full animate-pulse ${state === AppState.IDLE ? 'bg-slate-300' : 'bg-emerald-500'}`}></div>
           <div className="flex flex-col">
-            <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">产线动态</span>
+            <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">流水线状态</span>
             <span className="text-xs font-black text-slate-900 tracking-tight">
-              {state === AppState.GENERATING_IMAGE ? '正在批量生产资产...' : 
+              {state === AppState.GENERATING_IMAGE ? '正在渲染全套方案中...' : 
                state === AppState.GENERATING_VIDEO ? videoStatus || '正在渲染动态流...' : 
-               '产线就绪 (Structural Lock Enabled)'}
+               '产线就绪 (Structural Lock Active)'}
             </span>
           </div>
         </div>
         <div className="hidden md:flex items-center gap-4 px-6 py-2 bg-indigo-50 border border-indigo-100 rounded-2xl text-[10px] font-black text-indigo-600 uppercase tracking-widest">
-           <Clock className="w-3.5 h-3.5" /> 自动保存已激活
+           <Clock className="w-3.5 h-3.5" /> 已激活溯源保存
         </div>
       </footer>
 
