@@ -3,7 +3,7 @@ import { GoogleGenAI, Type, GenerateContentResponse } from "@google/genai";
 import { ProductAnalysis, IndividualAnalysis, SceneType } from "../types";
 
 /**
- * 分析每一张参考图或视频的具体内容
+ * 分析每一张参考图或视频的具体内容，增强了对视频动态和关键帧的解析
  */
 export const analyzeIndividualImages = async (
   images: {id: string, data: string, type: 'image' | 'video'}[],
@@ -25,10 +25,26 @@ export const analyzeIndividualImages = async (
       }
     };
 
-    const prompt = `你正在分析产品“${productName}”的参考${isVideo ? '视频' : '图'}。请详细描述其中展示的产品部分、结构特征、材质细节以及它呈现的特定功能或角度。
-    如果是视频，请分析整个动态过程中的结构变化。
-    请重点捕捉产品的独特设计语言，以便后续生成保持一致性的分镜。
-    输出格式为 JSON: { "description": "..." }`;
+    const prompt = isVideo 
+      ? `你正在深度解析产品“${productName}”的参考视频。
+         请执行以下分析：
+         1. 静态描述：识别视频中展示的产品核心组件、材质（如磨砂、金属、透明等）和品牌标识。
+         2. 动态分析：详细描述视频中的运动特性。包括旋转、折叠、伸缩或模特的交互动作。
+         3. 结构变化：分析在运动过程中产品的外观结构如何演变。
+         4. 关键帧特征：提取视频中最重要的视觉锚点细节。
+         
+         你的分析将直接用于生成高一致性的 9 宫格分镜。
+         输出格式为 JSON: { "description": "产品静态描述", "motionDynamics": "动态运动与结构演变分析" }`
+      : `你正在分析产品“${productName}”的参考图。
+         请详细描述其中展示的产品部分、结构特征、材质细节、光影表现以及其呈现的特定功能角度。
+         输出格式为 JSON: { "description": "..." }`;
+
+    const properties: any = {
+      description: { type: Type.STRING }
+    };
+    if (isVideo) {
+      properties.motionDynamics = { type: Type.STRING };
+    }
 
     const response = await ai.models.generateContent({
       model,
@@ -37,16 +53,18 @@ export const analyzeIndividualImages = async (
         responseMimeType: "application/json",
         responseSchema: {
           type: Type.OBJECT,
-          properties: {
-            description: { type: Type.STRING }
-          },
-          required: ["description"]
+          properties,
+          required: isVideo ? ["description", "motionDynamics"] : ["description"]
         }
       }
     });
 
     const parsed = JSON.parse(response.text || '{"description": "无法识别"}');
-    results.push({ id: item.id, description: parsed.description });
+    results.push({ 
+      id: item.id, 
+      description: parsed.description,
+      motionDynamics: parsed.motionDynamics 
+    });
   }
 
   return results;
@@ -62,16 +80,23 @@ export const synthesizeProductProfile = async (
   const ai = new GoogleGenAI({ apiKey: process.env.API_KEY as string });
   const model = 'gemini-3-flash-preview';
 
-  const context = individualAnalyses.map((a, i) => `参考 ${i+1} 分析结果: ${a.description}`).join('\n');
-  const prompt = `基于以下对产品“${productName}”的多张参考资料的分析，请综合推导出该产品的全局核心档案。
-  你的目标是提炼出该产品的本质结构和功能特征，确保后续生成的 9 宫格图像能完美继承这些“产品基因”。
+  const context = individualAnalyses.map((a, i) => {
+    let text = `参考 ${i+1} 分析: ${a.description}`;
+    if (a.motionDynamics) text += ` | 动态特性: ${a.motionDynamics}`;
+    return text;
+  }).join('\n');
 
+  const prompt = `基于以下对产品“${productName}”的多维参考资料（包含静态结构和动态视频分析），请综合提炼该产品的全局核心档案。
+  
+  你需要整合视频中表现出的动态结构一致性，确保后续生成的 9 宫格图像能完美继承产品的“运动基因”和“结构逻辑”。
+
+  资料汇总：
   ${context}
   
   请按以下维度输出（用于分镜策划）：
-  1. 产品细节 (Details): 综合外观结构、品牌标志位置、材质纹理。
-  2. 产品用途 (Usage): 核心受众、核心功能展示。
-  3. 使用演示 (HowToUse): 典型的交互或使用步骤演示逻辑。
+  1. 产品细节 (Details): 综合外观、材质细节、品牌标识在不同动态下的稳定性。
+  2. 产品用途 (Usage): 核心受众、产品在动态场景中的功能表现。
+  3. 使用演示 (HowToUse): 典型的交互逻辑，包含视频中捕捉到的手势、动作方向和结构反馈。
   
   输出格式为 JSON。`;
 
@@ -110,9 +135,9 @@ export const generateStoryboards = async (
 
   const systemInstruction = language === 'zh' 
     ? `你是一个专业的产品分镜策划师。你擅长根据产品“${productName}”的细节，在指定的${sceneType}场景下生成电影级、高凝聚力的3x3网格分镜提示词。
-       重要指令：如果分镜中涉及模特/人物与产品的互动，你必须在每个分镜中详细描述互动细节，包括肢体动作、具体的接触点、互动的具体方向和力度感。这些细节必须明确以确保AI生成时的物理一致性。`
+       重要指令：如果分镜中涉及模特/人物与产品的互动，你必须利用提炼出的“使用演示”逻辑，在每个分镜中详细描述互动细节，包括肢体动作、具体的接触点、互动的具体方向和力度感。这些细节必须明确以确保AI生成时的物理一致性。`
     : `You are a professional product storyboard planner for "${productName}". You excel at generating cinematic, highly cohesive 3x3 grid storyboard prompts under the specified ${sceneType} scene setting.
-       CRITICAL INSTRUCTION: If models/humans interact with the product, you MUST detail the interaction: specific gestures, contact points, and direction/force. These details must be explicit to ensure physical consistency in AI generation.`;
+       CRITICAL INSTRUCTION: Utilize the extracted "HowToUse" logic to detail interaction: specific gestures, contact points, and direction/force. These details must be explicit to ensure physical consistency in AI generation.`;
 
   const templatePrompt = `
     产品名称: ${productName}
@@ -120,7 +145,7 @@ export const generateStoryboards = async (
     - 视觉细节: ${profile.details}
     - 核心功能: ${profile.usage}
     - 使用逻辑: ${profile.howToUse}
-    - 推荐场景: ${sceneType}
+    - 场景环境: ${sceneType}
     
     任务：生成 ${quantity} 份独特且具有商业叙事感的分镜方案。
     要求：生成的 9 宫格图片必须严格参考“视觉细节”中的产品结构。

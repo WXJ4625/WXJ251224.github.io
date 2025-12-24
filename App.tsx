@@ -35,12 +35,46 @@ import {
   History,
   Clock,
   ChevronRight,
-  Box
+  Box,
+  Activity
 } from 'lucide-react';
 import { AppState, ProductAnalysis, IndividualAnalysis, SceneType, VideoResult, HistoryRecord, ProductPrompt } from './types';
 import { analyzeIndividualImages, synthesizeProductProfile, generateStoryboards, generateStoryboardImage, generateVideo } from './services/geminiService';
 
 const SCENE_OPTIONS: SceneType[] = ['Studio', 'Lifestyle', 'Outdoor', 'Tech/Laboratory', 'Cinematic', 'Minimalist'];
+
+/**
+ * 提取视频关键帧的辅助工具
+ */
+const extractFramesFromVideo = async (dataUrl: string, count: number = 4): Promise<string[]> => {
+  return new Promise((resolve) => {
+    const video = document.createElement('video');
+    video.src = dataUrl;
+    video.crossOrigin = 'anonymous';
+    video.muted = true;
+    
+    const frames: string[] = [];
+    video.onloadedmetadata = async () => {
+      const canvas = document.createElement('canvas');
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return resolve([]);
+      
+      canvas.width = video.videoWidth / 2; // Resize for speed
+      canvas.height = video.videoHeight / 2;
+      
+      const duration = video.duration;
+      for (let i = 1; i <= count; i++) {
+        const time = (duration / (count + 1)) * i;
+        video.currentTime = time;
+        await new Promise(r => video.onseeked = r);
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        frames.push(canvas.toDataURL('image/jpeg', 0.7));
+      }
+      resolve(frames);
+    };
+    video.onerror = () => resolve([]);
+  });
+};
 
 const App: React.FC = () => {
   const [state, setState] = useState<AppState>(AppState.IDLE);
@@ -61,11 +95,9 @@ const App: React.FC = () => {
   const [zoomImage, setZoomImage] = useState<string | null>(null);
   const [copyStates, setCopyStates] = useState<Record<string, boolean>>({});
   
-  // History State
   const [history, setHistory] = useState<HistoryRecord[]>([]);
   const [showHistory, setShowHistory] = useState<boolean>(false);
 
-  // Load history from localStorage on mount
   useEffect(() => {
     const stored = localStorage.getItem('storyboard_history');
     if (stored) {
@@ -82,9 +114,8 @@ const App: React.FC = () => {
       id: Math.random().toString(36).substr(2, 9),
       timestamp: Date.now(),
       productName: productName || '未命名产品',
-      // Store the main structure reference
       referenceImage: images.find(i => i.type === 'image')?.data || images[0]?.data || '',
-      prompts: JSON.parse(JSON.stringify(prompts)), // Deep copy to prevent mutation
+      prompts: JSON.parse(JSON.stringify(prompts)),
       analysis: JSON.parse(JSON.stringify(currentAnalysis))
     };
     const updatedHistory = [newRecord, ...history].slice(0, 50); 
@@ -151,9 +182,20 @@ const App: React.FC = () => {
     setState(AppState.ANALYZING_INDIVIDUAL);
     setError(null);
     try {
-      const results = await analyzeIndividualImages(images, productName);
+      const rawResults = await analyzeIndividualImages(images, productName);
+      
+      // 增强：对视频提取关键帧用于 UI 展示
+      const enhancedResults = await Promise.all(rawResults.map(async (res) => {
+        const matchingAsset = images.find(img => img.id === res.id);
+        if (matchingAsset?.type === 'video') {
+          const frames = await extractFramesFromVideo(matchingAsset.data);
+          return { ...res, keyframes: frames };
+        }
+        return res;
+      }));
+
       setAnalysis({
-        individualAnalyses: results,
+        individualAnalyses: enhancedResults,
         globalProfile: { details: '', usage: '', howToUse: '' }
       });
       setState(AppState.EDITING_INDIVIDUAL);
@@ -378,7 +420,6 @@ const App: React.FC = () => {
           </div>
         </div>
 
-        {/* Upload Grid */}
         <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 lg:grid-cols-6 gap-8 mb-12">
           {images.map((img, i) => (
             <div key={img.id} className={`relative aspect-square rounded-[2rem] overflow-hidden border-4 transition-all ${i === 0 ? 'border-black ring-8 ring-black/5 shadow-2xl scale-105 z-10' : 'border-white shadow-md'}`}>
@@ -413,7 +454,6 @@ const App: React.FC = () => {
           )}
         </div>
 
-        {/* Product Name Input - Moved here per request */}
         <div className="mb-12">
           <label className="text-xs font-black uppercase tracking-[0.2em] text-slate-400 mb-4 block">产品识别名称</label>
           <input 
@@ -434,30 +474,82 @@ const App: React.FC = () => {
         </button>
       </section>
 
-      {/* INDIVIDUAL ANALYSIS DISPLAY */}
+      {/* INDIVIDUAL ANALYSIS DISPLAY - Enhanced with Motion Dynamics and Keyframes */}
       {analysis && analysis.individualAnalyses.length > 0 && (
         <section className="bg-slate-50 p-12 rounded-[3.5rem] border border-slate-100 animate-in slide-in-from-bottom-12 w-full">
           <div className="flex items-center gap-6 mb-12">
             <span className="w-16 h-16 rounded-[2rem] bg-indigo-600 text-white flex items-center justify-center text-2xl font-black">02</span>
-            <h2 className="text-4xl font-black">结构解析明细</h2>
+            <h2 className="text-4xl font-black">结构与动态解析</h2>
           </div>
-          <div className="space-y-8">
-            {analysis.individualAnalyses.map((item, idx) => (
-              <div key={item.id} className="flex flex-col lg:flex-row gap-8 p-8 bg-white rounded-[3rem] shadow-sm items-start border border-slate-100">
-                <div className="w-full lg:w-40 aspect-square rounded-[2rem] overflow-hidden border-4 border-slate-50 flex-shrink-0">
-                  {images.find(i => i.id === item.id)?.type === 'video' ? <Video className="w-full h-full p-10 text-slate-300" /> : <img src={images.find(img => img.id === item.id)?.data} className="w-full h-full object-cover" />}
+          <div className="space-y-12">
+            {analysis.individualAnalyses.map((item, idx) => {
+              const matchingAsset = images.find(img => img.id === item.id);
+              const isVideoAsset = matchingAsset?.type === 'video';
+
+              return (
+                <div key={item.id} className="flex flex-col gap-8 p-10 bg-white rounded-[3rem] shadow-sm items-start border border-slate-100">
+                  <div className="flex flex-col lg:flex-row gap-10 w-full">
+                    <div className="w-full lg:w-60 aspect-square rounded-[2rem] overflow-hidden border-4 border-slate-50 flex-shrink-0 relative">
+                      {isVideoAsset ? (
+                        <div className="w-full h-full bg-slate-900 flex items-center justify-center">
+                          <Video className="w-12 h-12 text-slate-500" />
+                          <div className="absolute top-4 left-4 px-3 py-1 bg-blue-500 text-white text-[10px] font-black rounded-lg uppercase">Video Asset</div>
+                        </div>
+                      ) : (
+                        <img src={matchingAsset?.data} className="w-full h-full object-cover" />
+                      )}
+                    </div>
+                    
+                    <div className="flex-1 space-y-6 w-full">
+                      <div className="space-y-4">
+                        <label className="text-[10px] font-black uppercase tracking-widest text-slate-400">核心结构与材质描述</label>
+                        <textarea 
+                          className="w-full p-6 text-lg font-bold bg-slate-50 border-0 rounded-3xl focus:ring-4 focus:ring-indigo-50 outline-none resize-none min-h-[120px]"
+                          value={item.description}
+                          onChange={(e) => {
+                            const n = [...analysis.individualAnalyses];
+                            n[idx].description = e.target.value;
+                            setAnalysis({...analysis, individualAnalyses: n});
+                          }}
+                        />
+                      </div>
+
+                      {isVideoAsset && item.motionDynamics && (
+                        <div className="space-y-4 animate-in fade-in duration-500">
+                          <div className="flex items-center gap-3">
+                            <Activity className="w-4 h-4 text-blue-500" />
+                            <label className="text-[10px] font-black uppercase tracking-widest text-blue-500">动态结构与运动分析 (Motion Dynamics)</label>
+                          </div>
+                          <textarea 
+                            className="w-full p-6 text-lg font-bold bg-blue-50/30 text-blue-900 border-2 border-blue-50 rounded-3xl focus:ring-4 focus:ring-blue-100 outline-none resize-none min-h-[120px]"
+                            value={item.motionDynamics}
+                            onChange={(e) => {
+                              const n = [...analysis.individualAnalyses];
+                              n[idx].motionDynamics = e.target.value;
+                              setAnalysis({...analysis, individualAnalyses: n});
+                            }}
+                          />
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Keyframes Gallery for Video */}
+                  {isVideoAsset && item.keyframes && item.keyframes.length > 0 && (
+                    <div className="w-full pt-8 border-t border-slate-50">
+                       <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-6 block">提取的关键帧 (Keyframes Extraction)</label>
+                       <div className="grid grid-cols-2 sm:grid-cols-4 gap-6">
+                          {item.keyframes.map((frame, fidx) => (
+                            <div key={fidx} className="aspect-video rounded-2xl overflow-hidden border-2 border-slate-100 shadow-sm hover:scale-105 transition-transform cursor-pointer" onClick={() => setZoomImage(frame)}>
+                               <img src={frame} className="w-full h-full object-cover" />
+                            </div>
+                          ))}
+                       </div>
+                    </div>
+                  )}
                 </div>
-                <textarea 
-                  className="w-full p-6 text-xl font-bold bg-slate-50 border-0 rounded-3xl focus:ring-4 focus:ring-indigo-50 outline-none resize-none min-h-[100px]"
-                  value={item.description}
-                  onChange={(e) => {
-                    const n = [...analysis.individualAnalyses];
-                    n[idx].description = e.target.value;
-                    setAnalysis({...analysis, individualAnalyses: n});
-                  }}
-                />
-              </div>
-            ))}
+              );
+            })}
           </div>
           <button disabled={state === AppState.ANALYZING_GLOBAL} onClick={startGlobalSynthesis} className="w-full mt-12 py-8 rounded-[2.5rem] bg-indigo-600 text-white font-black text-2xl flex items-center justify-center gap-6 hover:scale-[1.005] shadow-xl">
             {state === AppState.ANALYZING_GLOBAL ? <Loader2 className="w-10 h-10 animate-spin" /> : <><Zap className="w-10 h-10" /> 提炼全局核心基因</>}
@@ -563,7 +655,6 @@ const App: React.FC = () => {
                     />
                   </div>
                   
-                  {/* Categorized Shots Grid */}
                   <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">
                     {p.shots.map((shotContent, si) => (
                       <div key={si} className="bg-white p-8 rounded-3xl border border-slate-100 shadow-sm transition-all focus-within:ring-4 focus-within:ring-emerald-500/10 focus-within:border-emerald-500 group">
@@ -708,14 +799,14 @@ const App: React.FC = () => {
             <span className="text-xs font-black text-slate-900 tracking-tight">
               {state === AppState.GENERATING_IMAGE ? '正在批量渲染九宫格成品...' : 
                state === AppState.GENERATING_VIDEO ? videoStatus || '正在通过 Veo 渲染动态流...' : 
-               state === AppState.ANALYZING_INDIVIDUAL ? '正在对产线资产进行深度扫描...' :
+               state === AppState.ANALYZING_INDIVIDUAL ? '正在对产线资产进行深度扫描(包含动态分析)...' :
                state === AppState.GENERATING_PROMPTS ? '正在进行创意分镜策划...' :
                '流水线就绪 (Structural Locking Enabled)'}
             </span>
           </div>
         </div>
         <div className="hidden md:flex items-center gap-4 px-6 py-2 bg-indigo-50 border border-indigo-100 rounded-2xl text-[10px] font-black text-indigo-600 uppercase tracking-widest">
-           <Box className="w-3.5 h-3.5" /> 结构锁定：已激活
+           <Box className="w-3.5 h-3.5" /> 结构与运动锁定：已激活
         </div>
       </footer>
 

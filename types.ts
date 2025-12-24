@@ -2,6 +2,8 @@
 export interface IndividualAnalysis {
   id: string;
   description: string;
+  motionDynamics?: string;
+  keyframes?: string[];
 }
 
 export interface VideoResult {
