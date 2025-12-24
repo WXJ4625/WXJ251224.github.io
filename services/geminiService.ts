@@ -3,7 +3,7 @@ import { GoogleGenAI, Type, GenerateContentResponse } from "@google/genai";
 import { ProductAnalysis, IndividualAnalysis, SceneType } from "../types";
 
 /**
- * 分析每一张参考图或视频的具体内容
+ * 分析资产细节
  */
 export const analyzeIndividualImages = async (
   images: {id: string, data: string, type: 'image' | 'video'}[],
@@ -16,79 +16,49 @@ export const analyzeIndividualImages = async (
 
   for (let i = 0; i < images.length; i++) {
     const item = images[i];
-    const isVideo = item.type === 'video';
-    
     const mediaPart = {
       inlineData: {
         data: item.data.split(',')[1],
-        mimeType: isVideo ? 'video/mp4' : 'image/jpeg'
+        mimeType: item.type === 'video' ? 'video/mp4' : 'image/jpeg'
       }
     };
 
-    const prompt = isVideo 
-      ? `你正在深度解析产品“${productName}”的参考视频。
-         请执行以下分析：
-         1. 静态描述：识别产品核心组件、材质和品牌标识。
-         2. 动态分析：描述视频中的运动特性（旋转、折叠等）。
-         3. 结构变化：分析运动过程中产品的外观结构演变。
-         输出格式为 JSON: { "description": "产品静态描述", "motionDynamics": "动态运动分析" }`
-      : `你正在分析产品“${productName}”的参考图。
-         请详细描述产品结构特征、材质细节和功能角度。
-         输出格式为 JSON: { "description": "..." }`;
+    const prompt = `分析产品“${productName}”的特征、材质和结构。如果是视频，分析其运动逻辑。输出 JSON: { "description": "..." }`;
 
-    const properties: any = {
-      description: { type: Type.STRING }
-    };
-    if (isVideo) {
-      properties.motionDynamics = { type: Type.STRING };
-    }
-
-    const response = await ai.models.generateContent({
-      model,
-      contents: { parts: [mediaPart, { text: prompt }] },
-      config: {
-        responseMimeType: "application/json",
-        responseSchema: {
-          type: Type.OBJECT,
-          properties,
-          required: isVideo ? ["description", "motionDynamics"] : ["description"]
+    try {
+      const response = await ai.models.generateContent({
+        model,
+        contents: { parts: [mediaPart, { text: prompt }] },
+        config: {
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              description: { type: Type.STRING }
+            },
+            required: ["description"]
+          }
         }
-      }
-    });
-
-    const parsed = JSON.parse(response.text || '{"description": "无法识别"}');
-    results.push({ 
-      id: item.id, 
-      description: parsed.description,
-      motionDynamics: parsed.motionDynamics 
-    });
+      });
+      const parsed = JSON.parse(response.text || '{"description": "无法识别"}');
+      results.push({ id: item.id, description: parsed.description });
+    } catch (e) {
+      console.error("Analysis failed", e);
+      results.push({ id: item.id, description: "分析跳过" });
+    }
   }
 
   return results;
 };
 
 /**
- * 综合所有参考图分析
+ * 智能补全产品档案
  */
-export const synthesizeProductProfile = async (
-  individualAnalyses: IndividualAnalysis[],
-  productName: string
-): Promise<ProductAnalysis['globalProfile']> => {
+export const generateProductProfileFromText = async (productName: string): Promise<ProductAnalysis['globalProfile']> => {
   const ai = new GoogleGenAI({ apiKey: process.env.API_KEY as string });
   const model = 'gemini-3-flash-preview';
 
-  const context = individualAnalyses.map((a, i) => {
-    let text = `参考 ${i+1} 分析: ${a.description}`;
-    if (a.motionDynamics) text += ` | 动态特性: ${a.motionDynamics}`;
-    return text;
-  }).join('\n');
-
-  const prompt = `提炼产品“${productName}”的全局核心档案。
-  
-  资料汇总：
-  ${context}
-  
-  输出格式为 JSON。维度：details, usage, howToUse。`;
+  const prompt = `基于产品名称“${productName}”，分析其细节材质、功能卖点、目标受众、交互动作。输出 JSON。`;
 
   const response = await ai.models.generateContent({
     model,
@@ -99,10 +69,11 @@ export const synthesizeProductProfile = async (
         type: Type.OBJECT,
         properties: {
           details: { type: Type.STRING },
-          usage: { type: Type.STRING },
-          howToUse: { type: Type.STRING }
+          features: { type: Type.STRING },
+          audience: { type: Type.STRING },
+          interaction: { type: Type.STRING }
         },
-        required: ["details", "usage", "howToUse"]
+        required: ["details", "features", "audience", "interaction"]
       }
     }
   });
@@ -111,7 +82,41 @@ export const synthesizeProductProfile = async (
 };
 
 /**
- * 生成分镜建议 - 使用 Flash 模型以节省配额并提高速度
+ * 综合生成分镜
+ */
+export const synthesizeProductProfile = async (
+  individualAnalyses: IndividualAnalysis[],
+  productName: string
+): Promise<ProductAnalysis['globalProfile']> => {
+  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY as string });
+  const model = 'gemini-3-flash-preview';
+
+  const context = individualAnalyses.map(a => a.description).join('\n');
+  const prompt = `基于以下资产描述，提炼产品“${productName}”的 details, features, audience, interaction。输出 JSON。资产描述：\n${context}`;
+
+  const response = await ai.models.generateContent({
+    model,
+    contents: prompt,
+    config: {
+      responseMimeType: "application/json",
+      responseSchema: {
+        type: Type.OBJECT,
+        properties: {
+          details: { type: Type.STRING },
+          features: { type: Type.STRING },
+          audience: { type: Type.STRING },
+          interaction: { type: Type.STRING }
+        },
+        required: ["details", "features", "audience", "interaction"]
+      }
+    }
+  });
+
+  return JSON.parse(response.text || '{}') as ProductAnalysis['globalProfile'];
+};
+
+/**
+ * 批量生成分镜方案 (1-50份)
  */
 export const generateStoryboards = async (
   profile: ProductAnalysis['globalProfile'], 
@@ -121,33 +126,30 @@ export const generateStoryboards = async (
   sceneType: SceneType
 ): Promise<string[]> => {
   const ai = new GoogleGenAI({ apiKey: process.env.API_KEY as string });
-  // 使用 Flash-preview 替代 Pro 以获得更高配额
   const model = 'gemini-3-flash-preview';
 
-  const systemInstruction = `You are a professional commercial storyboard planner. Use high-efficiency creative logic to plan a 3x3 cohesive grid.
-  Key Requirement: Strict structural consistency based on details provided.
-  Language: ${language === 'zh' ? 'Chinese' : 'English'}.`;
+  const systemInstruction = `你是一位顶尖分镜摄影师。你的任务是为产品“${productName}”创作 ${quantity} 套独特的分镜策划。
+  语言：${language === 'zh' ? '中文' : '英文'}。
+  
+  格式要求：
+  1. 每套方案开头是一个包含 3x3 布局和一致性要求的总指令。
+  2. 随后列出 镜头01 至 镜头09，每个镜头需包含构图、光影及产品展示细节。
+  3. 每个镜头之间必须换行。`;
 
-  const templatePrompt = `
-    产品: ${productName}
-    细节: ${profile.details}
-    功能: ${profile.usage}
-    交互逻辑: ${profile.howToUse}
-    环境: ${sceneType}
+  const prompt = `
+    产品详情: ${profile.details}
+    功能卖点: ${profile.features}
+    受众调性: ${profile.audience}
+    交互逻辑: ${profile.interaction}
+    场景主题: ${sceneType}
     
-    任务：生成 ${quantity} 份独立的分镜策划方案。
-    格式规范：
-    根据[${profile.details}>kx]，生成一张具有凝聚力的[3x3]网格图像...
-    镜头01: ...
-    ...
-    镜头09: ...
-
-    输出 JSON 字符串数组。
+    请生成 ${quantity} 个独立的分镜文本块。
+    输出格式为 JSON 字符串数组。
   `;
 
   const response = await ai.models.generateContent({
     model,
-    contents: templatePrompt,
+    contents: prompt,
     config: {
       systemInstruction,
       responseMimeType: "application/json",
@@ -162,26 +164,26 @@ export const generateStoryboards = async (
 };
 
 /**
- * 生成 9 宫格图片
+ * 生成 9 宫格预览图
  */
-export const generateStoryboardImage = async (prompt: string, referenceImageBase64: string): Promise<string> => {
+export const generateGridImage = async (prompt: string, referenceBase64?: string): Promise<string> => {
   const ai = new GoogleGenAI({ apiKey: process.env.API_KEY as string });
+  const model = 'gemini-2.5-flash-image';
   
-  const imagePart = {
-    inlineData: {
-      data: referenceImageBase64.split(',')[1],
-      mimeType: 'image/jpeg'
-    }
-  };
+  const contents: any[] = [{ text: `High quality commercial product photography, 3x3 storyboard grid, consistent style: ${prompt}` }];
+  
+  if (referenceBase64) {
+    contents.unshift({
+      inlineData: {
+        data: referenceBase64.split(',')[1],
+        mimeType: 'image/jpeg'
+      }
+    });
+  }
 
   const response = await ai.models.generateContent({
-    model: 'gemini-2.5-flash-image',
-    contents: { 
-      parts: [
-        imagePart, 
-        { text: `PROMPT: ${prompt}. Generate a professional 3x3 storyboard grid image.` }
-      ] 
-    },
+    model,
+    contents: { parts: contents },
     config: {
       imageConfig: {
         aspectRatio: "16:9"
@@ -189,50 +191,11 @@ export const generateStoryboardImage = async (prompt: string, referenceImageBase
     }
   });
 
-  let imageUrl = '';
   for (const part of response.candidates?.[0]?.content?.parts || []) {
     if (part.inlineData) {
-      imageUrl = `data:image/png;base64,${part.inlineData.data}`;
-      break;
+      return `data:image/png;base64,${part.inlineData.data}`;
     }
   }
-  
-  if (!imageUrl) throw new Error("Image generation failed");
-  return imageUrl;
-};
 
-/**
- * 生成视频
- */
-export const generateVideo = async (
-  prompt: string, 
-  base64Image: string, 
-  onStatusChange?: (status: string) => void
-): Promise<string> => {
-  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY as string });
-  const rawData = base64Image.split(',')[1];
-
-  let operation = await ai.models.generateVideos({
-    model: 'veo-3.1-fast-generate-preview',
-    prompt: `Consistent motion commercial video. ${prompt}`,
-    image: {
-      imageBytes: rawData,
-      mimeType: 'image/png',
-    },
-    config: {
-      numberOfVideos: 1,
-      resolution: '1080p',
-      aspectRatio: '16:9'
-    }
-  });
-
-  while (!operation.done) {
-    await new Promise(resolve => setTimeout(resolve, 10000));
-    operation = await ai.operations.getVideosOperation({ operation: operation });
-  }
-
-  const downloadLink = operation.response?.generatedVideos?.[0]?.video?.uri;
-  const response = await fetch(`${downloadLink}&key=${process.env.API_KEY}`);
-  const blob = await response.blob();
-  return URL.createObjectURL(blob);
+  throw new Error("图片生成失败");
 };

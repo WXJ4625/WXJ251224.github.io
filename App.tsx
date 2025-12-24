@@ -37,39 +37,13 @@ import {
   ChevronRight,
   Box,
   Activity,
-  Edit3
+  Edit3,
+  AlertCircle
 } from 'lucide-react';
 import { AppState, ProductAnalysis, IndividualAnalysis, SceneType, VideoResult, HistoryRecord, ProductPrompt } from './types';
-import { analyzeIndividualImages, synthesizeProductProfile, generateStoryboards, generateStoryboardImage, generateVideo } from './services/geminiService';
+import { analyzeIndividualImages, synthesizeProductProfile, generateStoryboards, generateProductProfileFromText, generateGridImage } from './services/geminiService';
 
 const SCENE_OPTIONS: SceneType[] = ['Studio', 'Lifestyle', 'Outdoor', 'Tech/Laboratory', 'Cinematic', 'Minimalist'];
-
-const extractFramesFromVideo = async (dataUrl: string, count: number = 4): Promise<string[]> => {
-  return new Promise((resolve) => {
-    const video = document.createElement('video');
-    video.src = dataUrl;
-    video.crossOrigin = 'anonymous';
-    video.muted = true;
-    const frames: string[] = [];
-    video.onloadedmetadata = async () => {
-      const canvas = document.createElement('canvas');
-      const ctx = canvas.getContext('2d');
-      if (!ctx) return resolve([]);
-      canvas.width = video.videoWidth / 2;
-      canvas.height = video.videoHeight / 2;
-      const duration = video.duration;
-      for (let i = 1; i <= count; i++) {
-        const time = (duration / (count + 1)) * i;
-        video.currentTime = time;
-        await new Promise(r => video.onseeked = r);
-        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-        frames.push(canvas.toDataURL('image/jpeg', 0.7));
-      }
-      resolve(frames);
-    };
-    video.onerror = () => resolve([]);
-  });
-};
 
 const App: React.FC = () => {
   const [state, setState] = useState<AppState>(AppState.IDLE);
@@ -77,17 +51,14 @@ const App: React.FC = () => {
   const [images, setImages] = useState<{id: string, data: string, type: 'image' | 'video'}[]>([]);
   const [analysis, setAnalysis] = useState<ProductAnalysis | null>(null);
   const [promptCount, setPromptCount] = useState<number>(3);
-  const [videoCount, setVideoCount] = useState<number>(1);
   const [language, setLanguage] = useState<'zh' | 'en'>('zh');
   const [sceneType, setSceneType] = useState<SceneType>('Studio');
   
   const [generatedPrompts, setGeneratedPrompts] = useState<ProductPrompt[]>([]);
-  const [renderedImages, setRenderedImages] = useState<Record<number, string>>({});
-  const [batchProgress, setBatchProgress] = useState<{ current: number, total: number } | null>(null);
-  const [videoResults, setVideoResults] = useState<Record<number, VideoResult[]>>({});
-  const [videoStatus, setVideoStatus] = useState<string>('');
+  const [gridImages, setGridImages] = useState<Record<number, string>>({});
+  const [imageLoading, setImageLoading] = useState<Record<number, boolean>>({});
+  
   const [error, setError] = useState<string | null>(null);
-  const [zoomImage, setZoomImage] = useState<string | null>(null);
   const [copyStates, setCopyStates] = useState<Record<string, boolean>>({});
   
   const [history, setHistory] = useState<HistoryRecord[]>([]);
@@ -123,7 +94,7 @@ const App: React.FC = () => {
     setAnalysis(record.analysis);
     setGeneratedPrompts(record.prompts);
     setImages([{ id: 'historical-' + record.id, data: record.referenceImage, type: 'image' }]);
-    setRenderedImages({});
+    setGridImages({});
     setState(AppState.COMPLETED);
     setShowHistory(false);
   };
@@ -154,91 +125,103 @@ const App: React.FC = () => {
 
   const removeImage = (id: string) => setImages(prev => prev.filter(img => img.id !== id));
 
-  // 深度解析逻辑 (可能会触发配额错误)
+  const handleError = (err: any) => {
+    if (err.message?.includes("quota") || err.status === 429) {
+      setError("API 配额已耗尽，请稍后再试或检查您的 API Key 额度。");
+    } else {
+      setError("执行过程中出现错误: " + (err.message || "未知错误"));
+    }
+    setState(AppState.IDLE);
+  };
+
   const startIndividualAnalysis = async () => {
     if (!productName.trim()) { setError("请输入产品名称"); return; }
     setState(AppState.ANALYZING_INDIVIDUAL);
     setError(null);
     try {
       const rawResults = await analyzeIndividualImages(images, productName);
-      const enhancedResults = await Promise.all(rawResults.map(async (res) => {
-        const matchingAsset = images.find(img => img.id === res.id);
-        if (matchingAsset?.type === 'video') {
-          const frames = await extractFramesFromVideo(matchingAsset.data);
-          return { ...res, keyframes: frames };
-        }
-        return res;
-      }));
-      setAnalysis({ individualAnalyses: enhancedResults, globalProfile: { details: '', usage: '', howToUse: '' } });
+      setAnalysis({ individualAnalyses: rawResults, globalProfile: { details: '', features: '', audience: '', interaction: '' } });
       setState(AppState.EDITING_INDIVIDUAL);
+      // 自动执行一次全局综合
+      await startGlobalSynthesis();
     } catch (err: any) {
-      if (err.message?.includes("quota")) {
-        setError("API 配额超限。建议点击下方的“直接开始策划”按钮，手动输入产品详情。");
-      } else {
-        setError("分析资产失败，请检查网络。");
-      }
-      setState(AppState.IDLE);
+      handleError(err);
+      await skipToManualStrategy();
     }
   };
 
-  // 新增：直接开始策划 (跳过耗时的 AI 图像分析)
-  const skipToManualStrategy = () => {
+  const skipToManualStrategy = async () => {
     if (!productName.trim()) { setError("请输入产品名称"); return; }
-    setAnalysis({
-      individualAnalyses: [],
-      globalProfile: {
-        details: `${productName}，高科技质感，现代简约设计...`,
-        usage: `日常办公、生活化场景、专业摄影棚...`,
-        howToUse: `模特握持、单手操作、放置在桌面上演示...`
-      }
-    });
-    setState(AppState.EDITING_GLOBAL);
+    setState(AppState.ANALYZING_GLOBAL);
+    try {
+      const profile = await generateProductProfileFromText(productName);
+      setAnalysis({
+        individualAnalyses: [],
+        globalProfile: profile
+      });
+      setState(AppState.EDITING_GLOBAL);
+    } catch (err: any) {
+      handleError(err);
+      setAnalysis({
+        individualAnalyses: [],
+        globalProfile: { details: '', features: '', audience: '', interaction: '' }
+      });
+      setState(AppState.EDITING_GLOBAL);
+    }
   };
 
   const startGlobalSynthesis = async () => {
     if (!analysis) return;
-    setState(AppState.ANALYZING_GLOBAL);
     try {
       const profile = await synthesizeProductProfile(analysis.individualAnalyses, productName);
       setAnalysis({ ...analysis, globalProfile: profile });
       setState(AppState.EDITING_GLOBAL);
     } catch (err: any) {
-      if (err.message?.includes("quota")) {
-        setError("AI 综合配额超限，已为您开启手动编辑模式。");
-        setState(AppState.EDITING_GLOBAL);
-      } else {
-        setError("提炼失败。");
-        setState(AppState.EDITING_INDIVIDUAL);
-      }
+      handleError(err);
     }
   };
 
   const startPromptGeneration = async () => {
     if (!analysis) return;
     setState(AppState.GENERATING_PROMPTS);
-    setRenderedImages({});
+    setError(null);
     try {
       const results = await generateStoryboards(analysis.globalProfile, productName, promptCount, language, sceneType);
       const parsed = results.map(raw => {
         const lines = raw.split('\n').map(l => l.trim()).filter(l => l);
-        const instruction = lines[0] || '';
-        const shots = lines.filter(l => l.match(/^(?:镜头|Lens|Shot)\s*0?\d\s*:/i)).map(l => {
-          const p = l.split(':');
-          return p.slice(1).join(':').trim();
-        });
-        while (shots.length < 9) shots.push("");
-        return { instruction, shots: shots.slice(0, 9) };
+        const instruction = lines.find(l => !l.startsWith('镜头') && !l.startsWith('Shot')) || lines[0] || '';
+        const shots: string[] = [];
+        for (let i = 1; i <= 9; i++) {
+          const prefix = `镜头${i.toString().padStart(2, '0')}:`;
+          const altPrefix = `Shot ${i.toString().padStart(2, '0')}:`;
+          const line = lines.find(l => l.startsWith(prefix) || l.startsWith(altPrefix));
+          if (line) shots.push(line.split(':').slice(1).join(':').trim());
+          else shots.push("");
+        }
+        return { instruction, shots };
       });
       setGeneratedPrompts(parsed);
+      setGridImages({});
       saveToHistory(parsed, analysis);
       setState(AppState.COMPLETED);
     } catch (err: any) {
-      setError(err.message?.includes("quota") ? "提示词生成配额不足，请稍后再试或精简产品描述。" : "生成提示词失败。");
-      setState(AppState.EDITING_GLOBAL);
+      handleError(err);
     }
   };
 
-  // 其他辅助方法保持不变...
+  const handleGenerateImage = async (idx: number, prompt: string) => {
+    setImageLoading(prev => ({ ...prev, [idx]: true }));
+    try {
+      const referenceImg = images.find(img => img.type === 'image')?.data;
+      const imageUrl = await generateGridImage(prompt, referenceImg);
+      setGridImages(prev => ({ ...prev, [idx]: imageUrl }));
+    } catch (err: any) {
+      handleError(err);
+    } finally {
+      setImageLoading(prev => ({ ...prev, [idx]: false }));
+    }
+  };
+
   const copyToClipboard = (text: string, key: string) => {
     navigator.clipboard.writeText(text).then(() => {
       setCopyStates(prev => ({ ...prev, [key]: true }));
@@ -246,20 +229,42 @@ const App: React.FC = () => {
     });
   };
 
-  const getSerialID = (index: number) => {
-    const date = new Date();
-    const YYYYMMDD = date.getFullYear() + String(date.getMonth() + 1).padStart(2, '0') + String(date.getDate()).padStart(2, '0');
-    return `${productName || '产品'}-${YYYYMMDD}${(index + 1).toString().padStart(3, '0')}`;
+  const constructFullPrompt = (p: ProductPrompt) => {
+    const shotsPart = p.shots
+      .map((shot, i) => `镜头${(i + 1).toString().padStart(2, '0')}: ${shot}`)
+      .join('\n');
+    return `${p.instruction}\n${shotsPart}`;
   };
 
   const downloadPromptsAsCSV = () => {
-    const headers = ['产品名称-年月日序号', '主指令', '镜头01', '镜头02', '镜头03', '镜头04', '镜头05', '镜头06', '镜头07', '镜头08', '镜头09'];
-    const rows = generatedPrompts.map((p, index) => [getSerialID(index), p.instruction, ...p.shots].map(c => `"${c.replace(/"/g, '""')}"`).join(','));
-    const blob = new Blob(['\ufeff' + [headers.join(','), ...rows].join('\n')], { type: 'text/csv;charset=utf-8;' });
-    const link = document.createElement('a');
-    link.href = URL.createObjectURL(blob);
-    link.download = `storyboard_${productName}.csv`;
+    if (generatedPrompts.length === 0) return;
+    
+    let csvContent = "\uFEFF"; 
+    csvContent += "方案编号,总指令,镜头01,镜头02,镜头03,镜头04,镜头05,镜头06,镜头07,镜头08,镜头09\n";
+    
+    generatedPrompts.forEach((p, idx) => {
+      const row = [
+        `方案 ${idx + 1}`,
+        `"${p.instruction.replace(/"/g, '""')}"`,
+        ...p.shots.map(s => `"${s.replace(/"/g, '""')}"`)
+      ].join(",");
+      csvContent += row + "\n";
+    });
+    
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.setAttribute("href", url);
+    link.setAttribute("download", `${productName || 'storyboard'}_prompts.csv`);
+    document.body.appendChild(link);
     link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
+
+  const getSerialID = (idx: number) => {
+    const date = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+    return `STB-${date}-${(idx + 1).toString().padStart(3, '0')}`;
   };
 
   return (
@@ -270,7 +275,7 @@ const App: React.FC = () => {
              <Sparkles className="text-white w-8 h-8" />
              <h1 className="text-3xl font-black text-white tracking-tighter uppercase italic">Storyboard Pro</h1>
           </div>
-          <p className="text-slate-400 text-lg font-medium tracking-tight">AI 商业分镜产线 • 极速提示词策划</p>
+          <p className="text-slate-400 text-lg font-medium tracking-tight">极速生成 1-50 份商业摄影分镜方案</p>
         </div>
         <div className="flex items-center gap-4">
           <button onClick={() => setShowHistory(true)} className="px-8 py-4 bg-slate-100 rounded-2xl font-black text-sm flex items-center gap-3 hover:bg-slate-200 transition-all border border-slate-200"><History className="w-5 h-5" /> 历史记录</button>
@@ -278,11 +283,11 @@ const App: React.FC = () => {
         </div>
       </header>
 
-      {/* STEP 1: ASSET & NAMING */}
-      <section className="bg-slate-50 p-12 rounded-[3.5rem] border border-slate-100 shadow-sm w-full">
+      {/* STEP 1: UPLOAD */}
+      <section className="bg-slate-50 p-12 rounded-[3.5rem] border border-slate-100 shadow-sm relative overflow-hidden">
         <div className="flex items-center gap-6 mb-12">
           <span className="w-16 h-16 rounded-[2rem] bg-black text-white flex items-center justify-center text-2xl font-black">01</span>
-          <h2 className="text-4xl font-black">产品档案资产上传</h2>
+          <h2 className="text-4xl font-black">资产解析与档案补全</h2>
         </div>
 
         <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-6 mb-12">
@@ -301,10 +306,10 @@ const App: React.FC = () => {
         </div>
 
         <div className="mb-12">
-          <label className="text-xs font-black uppercase text-slate-400 mb-4 block">产品名称</label>
+          <label className="text-xs font-black uppercase text-slate-400 mb-4 block tracking-widest">产品名称</label>
           <input 
             type="text" 
-            placeholder="例如：高端按摩仪" 
+            placeholder="例如：高端无线吸尘器" 
             className="w-full p-8 text-3xl font-black bg-white border-4 border-slate-100 rounded-[2.5rem] outline-none focus:border-black transition-all"
             value={productName}
             onChange={(e) => setProductName(e.target.value)}
@@ -313,115 +318,129 @@ const App: React.FC = () => {
 
         <div className="flex flex-col sm:flex-row gap-6">
           <button 
-            disabled={images.length === 0 || !productName || state === AppState.ANALYZING_INDIVIDUAL}
+            disabled={images.length === 0 || !productName || state.includes('ANALYZING')}
             onClick={startIndividualAnalysis}
             className="flex-1 py-8 rounded-[2.5rem] bg-black text-white font-black text-2xl flex items-center justify-center gap-6 shadow-2xl disabled:bg-slate-200"
           >
-            {state === AppState.ANALYZING_INDIVIDUAL ? <Loader2 className="w-10 h-10 animate-spin" /> : <><Search className="w-10 h-10" /> 深度资产分析</>}
+            {state === AppState.ANALYZING_INDIVIDUAL ? <Loader2 className="w-10 h-10 animate-spin" /> : <><Search className="w-10 h-10" /> 识别图片资产并策划</>}
           </button>
           
           <button 
-            disabled={!productName || state === AppState.ANALYZING_INDIVIDUAL}
+            disabled={!productName || state.includes('ANALYZING')}
             onClick={skipToManualStrategy}
-            className="px-10 py-8 rounded-[2.5rem] bg-indigo-50 text-indigo-600 font-black text-xl flex items-center justify-center gap-4 hover:bg-indigo-100 transition-all border-4 border-indigo-100"
+            className="px-10 py-8 rounded-[2.5rem] bg-white text-black font-black text-xl flex items-center justify-center gap-4 hover:bg-slate-100 transition-all border-4 border-slate-200 shadow-xl"
           >
-            <Edit3 className="w-8 h-8" /> 直接生成分镜 (配额受限选此项)
+            {state === AppState.ANALYZING_GLOBAL ? <Loader2 className="w-8 h-8 animate-spin" /> : <><Edit3 className="w-8 h-8" /> 直接由 AI 策划方案</>}
           </button>
         </div>
       </section>
 
-      {/* ANALYSIS RESULTS (ONLY SHOW IF ANALYZED) */}
-      {analysis && analysis.individualAnalyses.length > 0 && (
-        <section className="bg-slate-50 p-12 rounded-[3.5rem] border border-slate-100 animate-in slide-in-from-bottom-12 w-full">
+      {/* STEP 2: PROFILE & GENERATE */}
+      {analysis && (
+        <section className="bg-slate-50 p-12 rounded-[3.5rem] border border-slate-100 animate-in slide-in-from-bottom-12">
           <div className="flex items-center gap-6 mb-12">
             <span className="w-16 h-16 rounded-[2rem] bg-indigo-600 text-white flex items-center justify-center text-2xl font-black">02</span>
-            <h2 className="text-4xl font-black">资产结构解析</h2>
+            <h2 className="text-4xl font-black">策划配置与分镜生成</h2>
           </div>
-          <div className="space-y-8">
-            {analysis.individualAnalyses.map((item, idx) => (
-              <div key={item.id} className="flex flex-col lg:flex-row gap-8 p-8 bg-white rounded-[3rem] items-start border border-slate-100 shadow-sm">
-                <div className="w-40 aspect-square rounded-[2rem] overflow-hidden bg-slate-50 flex-shrink-0">
-                   {images.find(i => i.id === item.id)?.type === 'video' ? <Video className="w-full h-full p-10 text-slate-300" /> : <img src={images.find(img => img.id === item.id)?.data} className="w-full h-full object-cover" />}
+          
+          <div className="grid grid-cols-1 xl:grid-cols-2 gap-8 mb-12">
+             <div className="bg-white p-8 rounded-[2.5rem] shadow-sm space-y-4 border border-slate-100">
+                <label className="text-xs font-black uppercase text-slate-400">产品档案 (细节、卖点、受众)</label>
+                <div className="space-y-4">
+                  <textarea className="w-full p-4 text-sm font-medium bg-slate-50 rounded-2xl outline-none min-h-[80px]" value={analysis.globalProfile.details} onChange={e => setAnalysis({...analysis, globalProfile: {...analysis.globalProfile, details: e.target.value}})} placeholder="产品细节与材质..." />
+                  <textarea className="w-full p-4 text-sm font-medium bg-slate-50 rounded-2xl outline-none min-h-[80px]" value={analysis.globalProfile.features} onChange={e => setAnalysis({...analysis, globalProfile: {...analysis.globalProfile, features: e.target.value}})} placeholder="核心功能卖点..." />
                 </div>
-                <div className="flex-1 w-full space-y-4">
-                  <textarea className="w-full p-6 text-xl font-bold bg-slate-50 border-0 rounded-3xl min-h-[100px]" value={item.description} onChange={(e) => { const n = [...analysis.individualAnalyses]; n[idx].description = e.target.value; setAnalysis({...analysis, individualAnalyses: n}); }} />
-                  {item.motionDynamics && <p className="px-6 py-3 bg-blue-50 text-blue-600 rounded-xl text-sm font-bold flex items-center gap-2"><Activity className="w-4 h-4" /> 动态特性：{item.motionDynamics}</p>}
+             </div>
+             <div className="bg-white p-8 rounded-[2.5rem] shadow-sm space-y-4 border border-slate-100 flex flex-col">
+                <label className="text-xs font-black uppercase text-slate-400">生成设定</label>
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="space-y-2">
+                    <span className="text-[10px] font-black uppercase text-slate-400">生成份数 (1-50)</span>
+                    <input type="number" value={promptCount} onChange={e => setPromptCount(Math.min(50, Math.max(1, parseInt(e.target.value) || 1)))} className="w-full p-4 bg-slate-50 rounded-2xl font-black text-xl outline-none border-2 border-transparent focus:border-indigo-500" />
+                  </div>
+                  <div className="space-y-2">
+                    <span className="text-[10px] font-black uppercase text-slate-400">语言设定</span>
+                    <button onClick={() => setLanguage(language === 'zh' ? 'en' : 'zh')} className="w-full p-4 bg-indigo-50 text-indigo-600 rounded-2xl font-black text-sm uppercase flex items-center justify-center gap-2">
+                       <RefreshCw className="w-4 h-4" /> {language === 'zh' ? '中文' : 'ENGLISH'}
+                    </button>
+                  </div>
                 </div>
-              </div>
-            ))}
-          </div>
-          <button disabled={state === AppState.ANALYZING_GLOBAL} onClick={startGlobalSynthesis} className="w-full mt-12 py-8 rounded-[2.5rem] bg-indigo-600 text-white font-black text-2xl shadow-xl">提炼全局策略</button>
-        </section>
-      )}
-
-      {/* CONFIG & GENERATION */}
-      {analysis && (state === AppState.EDITING_GLOBAL || state === AppState.GENERATING_PROMPTS || state === AppState.COMPLETED) && (
-        <section className="bg-slate-50 p-12 rounded-[3.5rem] border border-slate-100 animate-in slide-in-from-bottom-12 w-full">
-          <div className="flex items-center gap-6 mb-12">
-            <span className="w-16 h-16 rounded-[2rem] bg-emerald-600 text-white flex items-center justify-center text-2xl font-black">03</span>
-            <h2 className="text-4xl font-black">全局策略设定</h2>
-          </div>
-          <div className="bg-white p-12 rounded-[3rem] shadow-sm mb-12 space-y-8">
-            <div className="grid grid-cols-1 xl:grid-cols-2 gap-8">
-               <div className="space-y-4">
-                  <label className="text-xs font-black uppercase text-slate-400">产品外观细节</label>
-                  <textarea className="w-full p-8 text-2xl font-black bg-slate-50 border-0 rounded-[2rem] min-h-[140px]" value={analysis.globalProfile.details} onChange={e => setAnalysis({...analysis, globalProfile: {...analysis.globalProfile, details: e.target.value}})} />
-               </div>
-               <div className="space-y-4">
-                  <label className="text-xs font-black uppercase text-slate-400">核心交互演示</label>
-                  <textarea className="w-full p-8 text-2xl font-black bg-slate-50 border-0 rounded-[2rem] min-h-[140px]" value={analysis.globalProfile.howToUse} onChange={e => setAnalysis({...analysis, globalProfile: {...analysis.globalProfile, howToUse: e.target.value}})} />
-               </div>
-            </div>
-            <div className="flex flex-col xl:flex-row gap-8">
-               <div className="flex-1 space-y-4">
-                  <label className="text-xs font-black uppercase text-slate-400">生成份数 (1-50)</label>
-                  <input type="number" value={promptCount} onChange={e => setPromptCount(Math.min(50, Math.max(1, parseInt(e.target.value) || 1)))} className="w-full bg-slate-100 p-6 text-2xl font-black rounded-[2rem]" />
-               </div>
-               <div className="flex-1 space-y-4">
-                  <label className="text-xs font-black uppercase text-slate-400">商业场景</label>
-                  <div className="grid grid-cols-3 gap-3">
-                     {SCENE_OPTIONS.slice(0, 3).map(opt => (
-                       <button key={opt} onClick={() => setSceneType(opt)} className={`p-4 rounded-2xl text-xs font-black border-2 ${sceneType === opt ? 'bg-emerald-600 border-emerald-600 text-white' : 'bg-white border-slate-100 text-slate-400'}`}>{opt}</button>
+                <div className="mt-4 flex-1">
+                  <span className="text-[10px] font-black uppercase text-slate-400 mb-2 block">场景主题风格</span>
+                  <div className="flex flex-wrap gap-2">
+                     {SCENE_OPTIONS.map(opt => (
+                       <button key={opt} onClick={() => setSceneType(opt)} className={`px-4 py-2 rounded-xl text-[10px] font-black border-2 transition-all ${sceneType === opt ? 'bg-indigo-600 border-indigo-600 text-white' : 'bg-white border-slate-100 text-slate-400 hover:border-indigo-200'}`}>{opt}</button>
                      ))}
                   </div>
-               </div>
-            </div>
+                </div>
+             </div>
           </div>
-          <button onClick={startPromptGeneration} disabled={state === AppState.GENERATING_PROMPTS} className="w-full py-8 rounded-[2.5rem] bg-emerald-600 text-white font-black text-2xl shadow-2xl">
-            {state === AppState.GENERATING_PROMPTS ? <Loader2 className="w-10 h-10 animate-spin" /> : '立即生成分镜策划'}
+
+          <button onClick={startPromptGeneration} disabled={state === AppState.GENERATING_PROMPTS} className="w-full py-8 rounded-[2.5rem] bg-indigo-600 text-white font-black text-2xl shadow-2xl flex items-center justify-center gap-4 hover:bg-indigo-700 transition-all disabled:bg-slate-300">
+            {state === AppState.GENERATING_PROMPTS ? <Loader2 className="w-10 h-10 animate-spin" /> : <><Zap className="w-8 h-8" /> 生成 {promptCount} 套分镜策划案</>}
           </button>
         </section>
       )}
 
-      {/* PROMPT CARDS */}
+      {/* STEP 3: OUTPUT */}
       {generatedPrompts.length > 0 && (
-        <section className="space-y-12 w-full animate-in fade-in">
-          <div className="bg-black p-10 rounded-[3rem] text-white flex justify-between items-center shadow-2xl">
-            <h2 className="text-3xl font-black flex items-center gap-4"><Package className="w-10 h-10 text-emerald-400" /> 已生成 {generatedPrompts.length} 套方案</h2>
-            <button onClick={downloadPromptsAsCSV} className="px-10 py-5 bg-white text-black rounded-[2rem] font-black text-lg flex items-center gap-4 hover:scale-105 transition-all"><FileDown className="w-6 h-6" /> 导出策划 CSV</button>
+        <section className="space-y-12 animate-in fade-in">
+          <div className="bg-black p-10 rounded-[3rem] text-white flex justify-between items-center shadow-2xl flex-col md:flex-row gap-6">
+            <h2 className="text-3xl font-black flex items-center gap-4"><Package className="w-10 h-10 text-indigo-400" /> 分镜交付库 ({generatedPrompts.length} 套)</h2>
+            <button onClick={downloadPromptsAsCSV} className="px-10 py-5 bg-white text-black rounded-[2rem] font-black text-lg flex items-center gap-4 hover:scale-105 transition-all shadow-lg"><FileDown className="w-6 h-6" /> 导出全部 CSV</button>
           </div>
 
-          <div className="space-y-16">
+          <div className="grid grid-cols-1 gap-12">
             {generatedPrompts.map((p, idx) => (
-              <div key={idx} className="bg-white p-12 rounded-[4rem] shadow-xl border-4 border-slate-50 flex flex-col gap-8">
-                <div className="flex items-center gap-6">
-                  <span className="w-12 h-12 rounded-2xl bg-slate-900 text-white flex items-center justify-center font-black">#{idx + 1}</span>
-                  <h3 className="text-xl font-black">{getSerialID(idx)}</h3>
+              <div key={idx} className="bg-white p-10 rounded-[3.5rem] shadow-xl border-4 border-slate-50 flex flex-col lg:flex-row gap-10">
+                <div className="flex-1 flex flex-col gap-6">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-4">
+                      <span className="w-10 h-10 rounded-xl bg-slate-900 text-white flex items-center justify-center font-black">#{idx + 1}</span>
+                      <h3 className="text-lg font-black tracking-tight">{getSerialID(idx)}</h3>
+                    </div>
+                    <button 
+                      onClick={() => copyToClipboard(constructFullPrompt(p), `all-${idx}`)} 
+                      className="flex items-center gap-2 px-6 py-3 bg-indigo-50 text-indigo-600 hover:bg-indigo-600 hover:text-white rounded-2xl font-black text-xs transition-all"
+                    >
+                      {copyStates[`all-${idx}`] ? <CheckCircle2 className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
+                      复制提示词策划
+                    </button>
+                  </div>
+                  
+                  <div className="bg-slate-50 p-6 rounded-[2rem] border border-slate-100 flex-1 min-h-[250px] relative">
+                    <label className="absolute top-4 right-6 text-[8px] font-black uppercase text-slate-300 tracking-widest">Story Text</label>
+                    <textarea 
+                      className="w-full h-full p-2 text-xs font-medium text-slate-600 leading-relaxed bg-transparent border-0 outline-none resize-none"
+                      value={constructFullPrompt(p)}
+                      readOnly
+                    />
+                  </div>
+
+                  <button 
+                    onClick={() => handleGenerateImage(idx, constructFullPrompt(p))}
+                    disabled={imageLoading[idx]}
+                    className="w-full py-5 rounded-[1.5rem] bg-black text-white font-black text-sm flex items-center justify-center gap-3 hover:bg-indigo-900 transition-all disabled:bg-slate-200"
+                  >
+                    {imageLoading[idx] ? <Loader2 className="w-4 h-4 animate-spin" /> : <><ImageIcon className="w-4 h-4" /> 渲染 3x3 预览图</>}
+                  </button>
                 </div>
-                <div className="bg-slate-50 p-10 rounded-[3rem] space-y-10">
-                   <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-                      {p.shots.map((shot, si) => (
-                        <div key={si} className="bg-white p-6 rounded-3xl shadow-sm border border-slate-100 group">
-                           <div className="flex justify-between items-center mb-4">
-                              <span className="text-[10px] font-black text-slate-400 uppercase">镜头 0{si+1}</span>
-                              <button onClick={() => copyToClipboard(shot, `shot-${idx}-${si}`)} className="text-slate-300 hover:text-emerald-500">
-                                {copyStates[`shot-${idx}-${si}`] ? <Check className="w-4 h-4 text-emerald-500" /> : <Copy className="w-4 h-4" />}
-                              </button>
-                           </div>
-                           <p className="text-sm font-medium text-slate-700 leading-relaxed">{shot}</p>
-                        </div>
-                      ))}
-                   </div>
+
+                <div className="w-full lg:w-[400px] aspect-square bg-slate-100 rounded-[2.5rem] overflow-hidden border-2 border-slate-200 flex items-center justify-center relative shadow-inner">
+                  {gridImages[idx] ? (
+                    <img src={gridImages[idx]} className="w-full h-full object-cover animate-in fade-in zoom-in-95 duration-500" />
+                  ) : (
+                    <div className="flex flex-col items-center gap-4 text-slate-300">
+                      <LayoutGrid className="w-12 h-12" />
+                      <span className="font-black text-[10px] uppercase tracking-widest text-slate-400">Waiting for render...</span>
+                    </div>
+                  )}
+                  {imageLoading[idx] && (
+                    <div className="absolute inset-0 bg-white/70 backdrop-blur-md flex items-center justify-center flex-col gap-4">
+                      <Loader2 className="w-10 h-10 text-indigo-600 animate-spin" />
+                      <p className="font-black text-[10px] text-indigo-900 uppercase tracking-[0.2em] animate-pulse">Rendering storyboard...</p>
+                    </div>
+                  )}
                 </div>
               </div>
             ))}
@@ -429,51 +448,56 @@ const App: React.FC = () => {
         </section>
       )}
 
-      {/* HISTORY MODAL & FOOTER */}
-      {showHistory && (
-        <div className="fixed inset-0 z-[120] flex items-center justify-center p-6 bg-black/70 backdrop-blur-md">
-           <div className="bg-white w-full max-w-4xl max-h-[85vh] rounded-[3.5rem] overflow-hidden flex flex-col shadow-2xl">
-              <div className="p-10 border-b flex justify-between items-center bg-slate-50">
-                 <h3 className="text-3xl font-black flex items-center gap-6"><History className="w-8 h-8 text-indigo-600" /> 分镜历史库</h3>
-                 <button onClick={() => setShowHistory(false)} className="p-4 bg-white border rounded-2xl"><X className="w-6 h-6" /></button>
+      {/* ERROR MODAL */}
+      {error && (
+        <div className="fixed inset-0 z-[150] flex items-center justify-center p-6 bg-black/60 backdrop-blur-sm animate-in fade-in duration-300">
+           <div className="bg-white p-12 rounded-[3.5rem] shadow-2xl max-w-sm w-full text-center space-y-8 animate-in zoom-in-95 duration-300">
+              <div className="w-24 h-24 bg-red-50 text-red-500 rounded-full flex items-center justify-center mx-auto shadow-inner"><AlertCircle className="w-12 h-12" /></div>
+              <div className="space-y-4">
+                <h3 className="text-2xl font-black text-slate-900 tracking-tight">API 限制提醒</h3>
+                <p className="text-slate-500 font-medium text-sm leading-relaxed">{error}</p>
               </div>
-              <div className="flex-1 overflow-y-auto p-10 space-y-6">
-                 {history.length === 0 ? <p className="text-center py-20 text-slate-400 font-bold">暂无历史记录</p> : history.map(record => (
-                    <div key={record.id} className="p-8 bg-slate-50 rounded-[2.5rem] flex items-center justify-between group cursor-pointer hover:border-indigo-200 border border-transparent transition-all" onClick={() => loadHistoryRecord(record)}>
+              <button onClick={() => setError(null)} className="w-full py-5 bg-black text-white rounded-[1.5rem] font-black text-lg shadow-xl active:scale-95 transition-all">关闭</button>
+           </div>
+        </div>
+      )}
+
+      {/* HISTORY */}
+      {showHistory && (
+        <div className="fixed inset-0 z-[140] flex items-center justify-center p-6 bg-black/70 backdrop-blur-md animate-in fade-in duration-300">
+           <div className="bg-white w-full max-w-4xl max-h-[80vh] rounded-[3.5rem] overflow-hidden flex flex-col shadow-2xl border border-white/20 animate-in slide-in-from-bottom-8 duration-300">
+              <div className="p-10 border-b flex justify-between items-center bg-slate-50/50">
+                 <h3 className="text-2xl font-black flex items-center gap-4 text-slate-900"><History className="w-6 h-6 text-indigo-600" /> 分镜策划历史</h3>
+                 <button onClick={() => setShowHistory(false)} className="p-4 bg-white border rounded-2xl shadow-sm hover:bg-slate-50"><X className="w-6 h-6 text-slate-400" /></button>
+              </div>
+              <div className="flex-1 overflow-y-auto p-10 space-y-4">
+                 {history.length === 0 ? <p className="text-center py-20 text-slate-400 font-bold italic">No records found...</p> : history.map(record => (
+                    <div key={record.id} className="p-6 bg-slate-50 rounded-[2rem] flex items-center justify-between group cursor-pointer hover:bg-white border-2 border-transparent hover:border-indigo-100 transition-all shadow-sm" onClick={() => loadHistoryRecord(record)}>
                        <div className="flex items-center gap-6">
-                          <img src={record.referenceImage} className="w-20 h-20 rounded-2xl object-cover border-2 border-white shadow-sm" />
+                          {record.referenceImage ? <img src={record.referenceImage} className="w-16 h-16 rounded-xl object-cover border-2 border-white shadow-sm" /> : <div className="w-16 h-16 bg-white rounded-xl flex items-center justify-center shadow-sm"><Box className="w-8 h-8 text-slate-200" /></div>}
                           <div>
-                             <h4 className="text-xl font-black">{record.productName}</h4>
-                             <span className="text-xs text-slate-400 font-bold">{new Date(record.timestamp).toLocaleString()} • {record.prompts.length} 套方案</span>
+                             <h4 className="text-lg font-black text-slate-900">{record.productName}</h4>
+                             <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">{new Date(record.timestamp).toLocaleString()} • {record.prompts.length} 份策划</p>
                           </div>
                        </div>
-                       <ChevronRight className="w-8 h-8 text-slate-300 group-hover:text-indigo-600 transition-colors" />
+                       <ChevronRight className="w-6 h-6 text-slate-300 group-hover:text-indigo-600 transition-colors" />
                     </div>
                  ))}
               </div>
-              <div className="p-10 bg-slate-50 border-t flex justify-end"><button onClick={clearHistory} className="px-8 py-4 bg-red-50 text-red-600 rounded-2xl font-black text-xs">清空记录</button></div>
+              <div className="p-10 bg-slate-50/50 border-t flex justify-end"><button onClick={clearHistory} className="px-8 py-4 bg-red-50 text-red-600 rounded-xl font-black text-xs hover:bg-red-100 transition-colors">清空所有记录</button></div>
            </div>
         </div>
       )}
 
-      <footer className="fixed bottom-0 left-0 right-0 bg-white/95 backdrop-blur-3xl border-t border-slate-200 py-6 px-12 flex justify-between z-50 shadow-2xl">
-        <div className="flex items-center gap-6">
-          <div className={`w-3 h-3 rounded-full ${state === AppState.IDLE ? 'bg-slate-300' : 'bg-emerald-500 animate-pulse'}`}></div>
-          <span className="text-xs font-black text-slate-900 uppercase tracking-widest">{state === AppState.GENERATING_PROMPTS ? '正在进行创意策划...' : '产线就绪 (Flash 优化模式)'}</span>
+      <footer className="fixed bottom-0 left-0 right-0 bg-white/80 backdrop-blur-2xl border-t border-slate-100 py-4 px-12 flex justify-between z-[100] items-center">
+        <div className="flex items-center gap-4">
+          <div className={`w-2.5 h-2.5 rounded-full ${state === AppState.IDLE ? 'bg-slate-300' : 'bg-indigo-500 animate-pulse'}`}></div>
+          <span className="text-[10px] font-black text-slate-900 uppercase tracking-widest">{state === AppState.GENERATING_PROMPTS ? '生成策划中...' : '策划流水线就绪'}</span>
         </div>
-        <div className="hidden md:flex items-center gap-4 px-6 py-2 bg-indigo-50 text-indigo-600 rounded-2xl text-[10px] font-black uppercase"><Activity className="w-3.5 h-3.5" /> 结构锁定已启用</div>
+        <div className="flex items-center gap-3">
+          <div className="px-4 py-2 bg-slate-50 border rounded-xl text-[8px] font-black uppercase text-slate-400 tracking-widest">v1.2.5 • AI PROMPT ENGINE</div>
+        </div>
       </footer>
-
-      {error && (
-        <div className="fixed inset-0 z-[130] flex items-center justify-center p-6 bg-black/50 backdrop-blur-sm">
-           <div className="bg-white p-10 rounded-[3rem] shadow-2xl max-w-sm w-full text-center space-y-6">
-              <div className="w-20 h-20 bg-red-50 text-red-500 rounded-full flex items-center justify-center mx-auto"><X className="w-10 h-10" /></div>
-              <h3 className="text-2xl font-black">系统提示</h3>
-              <p className="text-slate-500 font-medium leading-relaxed">{error}</p>
-              <button onClick={() => setError(null)} className="w-full py-5 bg-black text-white rounded-2xl font-black text-lg">确认</button>
-           </div>
-        </div>
-      )}
     </div>
   );
 };

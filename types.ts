@@ -28,9 +28,10 @@ export interface HistoryRecord {
 export interface ProductAnalysis {
   individualAnalyses: IndividualAnalysis[];
   globalProfile: {
-    details: string;
-    usage: string;
-    howToUse: string;
+    details: string;      // 产品细节与材质
+    features: string;     // 功能与卖点
+    audience: string;     // 目标受众与品牌调性
+    interaction: string;  // 使用逻辑与交互动作
   };
 }
 
