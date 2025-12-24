@@ -1,5 +1,5 @@
 
-import React, { useState, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { 
   Camera, 
   Trash2, 
@@ -31,55 +31,102 @@ import {
   Scissors,
   X,
   Save,
-  RefreshCw
+  RefreshCw,
+  History,
+  Clock,
+  ChevronRight
 } from 'lucide-react';
-import { AppState, ProductAnalysis, IndividualAnalysis, SceneType, VideoResult } from './types';
+import { AppState, ProductAnalysis, IndividualAnalysis, SceneType, VideoResult, HistoryRecord, ProductPrompt } from './types';
 import { analyzeIndividualImages, synthesizeProductProfile, generateStoryboards, generateStoryboardImage, generateVideo } from './services/geminiService';
 
 const SCENE_OPTIONS: SceneType[] = ['Studio', 'Lifestyle', 'Outdoor', 'Tech/Laboratory', 'Cinematic', 'Minimalist'];
 
 const App: React.FC = () => {
   const [state, setState] = useState<AppState>(AppState.IDLE);
-  const [images, setImages] = useState<{id: string, data: string}[]>([]);
+  const [productName, setProductName] = useState<string>('');
+  const [images, setImages] = useState<{id: string, data: string, type: 'image' | 'video'}[]>([]);
   const [analysis, setAnalysis] = useState<ProductAnalysis | null>(null);
   const [promptCount, setPromptCount] = useState<number>(3);
   const [videoCount, setVideoCount] = useState<number>(1);
   const [language, setLanguage] = useState<'zh' | 'en'>('zh');
   const [sceneType, setSceneType] = useState<SceneType>('Studio');
   
-  // Track prompts as editable objects
-  const [generatedPrompts, setGeneratedPrompts] = useState<{instruction: string, shots: string[]}[]>([]);
-  
+  const [generatedPrompts, setGeneratedPrompts] = useState<ProductPrompt[]>([]);
   const [renderedImages, setRenderedImages] = useState<Record<number, string>>({});
   const [batchProgress, setBatchProgress] = useState<{ current: number, total: number } | null>(null);
-  
   const [videoResults, setVideoResults] = useState<Record<number, VideoResult[]>>({});
   const [videoStatus, setVideoStatus] = useState<string>('');
   const [error, setError] = useState<string | null>(null);
   const [zoomImage, setZoomImage] = useState<string | null>(null);
-  
   const [copyStates, setCopyStates] = useState<Record<string, boolean>>({});
+  
+  // History State
+  const [history, setHistory] = useState<HistoryRecord[]>([]);
+  const [showHistory, setShowHistory] = useState<boolean>(false);
+
+  // Load history from localStorage on mount
+  useEffect(() => {
+    const stored = localStorage.getItem('storyboard_history');
+    if (stored) {
+      try {
+        setHistory(JSON.parse(stored));
+      } catch (e) {
+        console.error("Failed to parse history", e);
+      }
+    }
+  }, []);
+
+  const saveToHistory = (prompts: ProductPrompt[], currentAnalysis: ProductAnalysis) => {
+    const newRecord: HistoryRecord = {
+      id: Math.random().toString(36).substr(2, 9),
+      timestamp: Date.now(),
+      productName: productName || '未命名产品',
+      referenceImage: images.find(i => i.type === 'image')?.data || images[0]?.data || '',
+      prompts,
+      analysis: currentAnalysis
+    };
+    const updatedHistory = [newRecord, ...history].slice(0, 50); // Keep last 50
+    setHistory(updatedHistory);
+    localStorage.setItem('storyboard_history', JSON.stringify(updatedHistory));
+  };
+
+  const loadHistoryRecord = (record: HistoryRecord) => {
+    setProductName(record.productName);
+    setAnalysis(record.analysis);
+    setGeneratedPrompts(record.prompts);
+    setImages([{ id: 'ref-historical', data: record.referenceImage, type: 'image' }]);
+    setRenderedImages({});
+    setState(AppState.COMPLETED);
+    setShowHistory(false);
+  };
+
+  const clearHistory = () => {
+    setHistory([]);
+    localStorage.removeItem('storyboard_history');
+  };
 
   const copyToClipboard = (text: string, key: string) => {
     navigator.clipboard.writeText(text).then(() => {
       setCopyStates(prev => ({ ...prev, [key]: true }));
-      setTimeout(() => {
-        setCopyStates(prev => ({ ...prev, [key]: false }));
-      }, 2000);
+      setTimeout(() => setCopyStates(prev => ({ ...prev, [key]: false })), 2000);
     }).catch(err => console.error('Failed to copy: ', err));
   };
 
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>, type: 'image' | 'video' = 'image') => {
     const files = Array.from(e.target.files || []);
-    if (images.length + files.length > 10) {
-      setError("最多只能上传10张参考图");
+    if (images.length + files.length > 12) {
+      setError("最多支持12个参考文件");
       return;
     }
     files.forEach((file: File) => {
       const reader = new FileReader();
       reader.onload = (ev) => {
         if (ev.target?.result) {
-          setImages(prev => [...prev, { id: Math.random().toString(36).substr(2, 9), data: ev.target!.result as string }]);
+          setImages(prev => [...prev, { 
+            id: Math.random().toString(36).substr(2, 9), 
+            data: ev.target!.result as string,
+            type
+          }]);
         }
       };
       reader.readAsDataURL(file);
@@ -89,11 +136,18 @@ const App: React.FC = () => {
   const removeImage = (id: string) => setImages(prev => prev.filter(img => img.id !== id));
 
   const startIndividualAnalysis = async () => {
-    if (images.length === 0) return;
+    if (images.length === 0) {
+      setError("请至少上传一张产品图片作为参考。");
+      return;
+    }
+    if (!productName.trim()) {
+      setError("请输入产品名称。");
+      return;
+    }
     setState(AppState.ANALYZING_INDIVIDUAL);
     setError(null);
     try {
-      const results = await analyzeIndividualImages(images);
+      const results = await analyzeIndividualImages(images, productName);
       setAnalysis({
         individualAnalyses: results,
         globalProfile: { details: '', usage: '', howToUse: '' }
@@ -109,7 +163,7 @@ const App: React.FC = () => {
     if (!analysis) return;
     setState(AppState.ANALYZING_GLOBAL);
     try {
-      const profile = await synthesizeProductProfile(analysis.individualAnalyses);
+      const profile = await synthesizeProductProfile(analysis.individualAnalyses, productName);
       setAnalysis({ ...analysis, globalProfile: profile });
       setState(AppState.EDITING_GLOBAL);
     } catch (err) {
@@ -123,7 +177,7 @@ const App: React.FC = () => {
     setState(AppState.GENERATING_PROMPTS);
     setRenderedImages({});
     try {
-      const results = await generateStoryboards(analysis.globalProfile, promptCount, language, sceneType);
+      const results = await generateStoryboards(analysis.globalProfile, productName, promptCount, language, sceneType);
       
       const parsed = results.map(raw => {
         const lines = raw.split('\n').map(l => l.trim()).filter(l => l);
@@ -132,12 +186,12 @@ const App: React.FC = () => {
           const p = l.split(':');
           return p.slice(1).join(':').trim();
         });
-        // Ensure exactly 9 shots for editing logic consistency
         while (shots.length < 9) shots.push("");
         return { instruction, shots: shots.slice(0, 9) };
       });
 
       setGeneratedPrompts(parsed);
+      saveToHistory(parsed, analysis);
       setState(AppState.COMPLETED);
     } catch (err) {
       setError("生成失败。");
@@ -167,7 +221,8 @@ const App: React.FC = () => {
     if (!fullPrompt || images.length === 0) return;
     setState(AppState.GENERATING_IMAGE);
     try {
-      const img = await generateStoryboardImage(fullPrompt, images[0].data);
+      const refImg = images.find(i => i.type === 'image')?.data || images[0].data;
+      const img = await generateStoryboardImage(fullPrompt, refImg);
       setRenderedImages(prev => ({ ...prev, [index]: img }));
       setState(AppState.COMPLETED);
     } catch (err: any) {
@@ -186,7 +241,8 @@ const App: React.FC = () => {
       setBatchProgress({ current: i + 1, total });
       try {
         const fullPrompt = constructFullPrompt(i);
-        const img = await generateStoryboardImage(fullPrompt, images[0].data);
+        const refImg = images.find(img => img.type === 'image')?.data || images[0].data;
+        const img = await generateStoryboardImage(fullPrompt, refImg);
         setRenderedImages(prev => ({ ...prev, [i]: img }));
       } catch (err) {
         console.error(`Index ${i} failed`, err);
@@ -201,27 +257,35 @@ const App: React.FC = () => {
       const idx = parseInt(key);
       const link = document.createElement('a');
       link.href = renderedImages[idx];
-      link.download = `storyboard_grid_${idx + 1}.png`;
+      link.download = `${idx + 1}.png`; 
       link.click();
     });
   };
 
+  const getSerialID = (index: number) => {
+    const date = new Date();
+    const YYYYMMDD = date.toISOString().split('T')[0].replace(/-/g, '');
+    const seq = (index + 1).toString().padStart(3, '0');
+    return `${productName || '未命名'}-${YYYYMMDD}${seq}`;
+  };
+
   const downloadPromptsAsCSV = () => {
     if (generatedPrompts.length === 0) return;
-    const headers = ['编号', '全局主指令', '镜头01', '镜头02', '镜头03', '镜头04', '镜头05', '镜头06', '镜头07', '镜头08', '镜头09'];
+    const headers = ['编号', '序号标识(产品名称-年月日序号)', '全局指令', '镜头01', '镜头02', '镜头03', '镜头04', '镜头05', '镜头06', '镜头07', '镜头08', '镜头09'];
     const rows = generatedPrompts.map((p, index) => {
       return [
         (index + 1).toString(),
+        getSerialID(index),
         p.instruction,
         ...p.shots
-      ].map(cell => `"${cell.replace(/"/g, '""')}"`).join(',');
+      ].map(cell => `"${(cell || '').replace(/"/g, '""')}"`).join(',');
     });
     const csvContent = [headers.join(','), ...rows].join('\n');
     const blob = new Blob(['\ufeff' + csvContent], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
-    link.download = `storyboard_prompts_${new Date().getTime()}.csv`;
+    link.download = `storyboard_prompts_${productName}_${new Date().getTime()}.csv`;
     link.click();
   };
 
@@ -232,12 +296,10 @@ const App: React.FC = () => {
       const canvas = document.createElement('canvas');
       const ctx = canvas.getContext('2d');
       if (!ctx) return;
-
       const cellWidth = img.width / 3;
       const cellHeight = img.height / 3;
       canvas.width = cellWidth;
       canvas.height = cellHeight;
-
       for (let row = 0; row < 3; row++) {
         for (let col = 0; col < 3; col++) {
           ctx.clearRect(0, 0, cellWidth, cellHeight);
@@ -252,28 +314,24 @@ const App: React.FC = () => {
     };
   };
 
-  const checkAndOpenKeySelector = async () => {
+  const generateSingleVideo = async (index: number) => {
+    const fullPrompt = constructFullPrompt(index);
+    const finalImage = renderedImages[index];
+    if (!fullPrompt || !finalImage) return;
+    
     // @ts-ignore
     const hasKey = await window.aistudio.hasSelectedApiKey();
     if (!hasKey) {
       // @ts-ignore
       await window.aistudio.openSelectKey();
     }
-  };
-
-  const generateSingleVideo = async (index: number) => {
-    const fullPrompt = constructFullPrompt(index);
-    const finalImage = renderedImages[index];
-    if (!fullPrompt || !finalImage) return;
-
-    await checkAndOpenKeySelector();
-    setState(AppState.GENERATING_VIDEO);
     
+    setState(AppState.GENERATING_VIDEO);
     try {
       const urls: VideoResult[] = [];
       for (let i = 0; i < videoCount; i++) {
-        setVideoStatus(`[方案 ${index+1}] 正在生成视频 ${i + 1}/${videoCount}...`);
-        const videoUrl = await generateVideo(fullPrompt, finalImage, (status) => setVideoStatus(`[方案 ${index+1}] ${status}`));
+        setVideoStatus(`正在生成视频 ${i + 1}...`);
+        const videoUrl = await generateVideo(fullPrompt, finalImage, (status) => setVideoStatus(status));
         urls.push({ id: Math.random().toString(36).substr(2, 9), url: videoUrl });
       }
       setVideoResults(prev => ({ ...prev, [index]: urls }));
@@ -288,113 +346,139 @@ const App: React.FC = () => {
 
   return (
     <div className="max-w-screen-xl mx-auto px-6 py-12 bg-white min-h-screen text-slate-900 font-sans pb-32 flex flex-col gap-16">
-      <header className="text-center">
-        <div className="inline-flex items-center justify-center p-6 bg-black rounded-[2.5rem] mb-8 shadow-2xl">
-          <Sparkles className="text-white w-14 h-14" />
+      <header className="flex flex-col md:flex-row items-center justify-between gap-10">
+        <div className="text-left">
+          <div className="inline-flex items-center gap-4 p-4 bg-black rounded-3xl mb-6 shadow-xl">
+             <Sparkles className="text-white w-8 h-8" />
+             <h1 className="text-3xl font-black text-white tracking-tighter uppercase italic">Storyboard Factory</h1>
+          </div>
+          <p className="text-slate-400 text-lg font-medium tracking-tight">垂直极速分镜策划 • 历史溯源修改 • 结构锁定渲染</p>
         </div>
-        <h1 className="text-7xl font-black text-slate-900 tracking-tighter mb-6 italic uppercase">
-          Storyboard Pro Factory
-        </h1>
-        <p className="text-slate-400 text-2xl font-medium tracking-tight">
-          垂直极速分镜工厂 • 提示词在线编辑 • 结构锁定渲染
-        </p>
+        <div className="flex items-center gap-4">
+          <button onClick={() => setShowHistory(true)} className="px-8 py-4 bg-slate-100 rounded-2xl font-black text-sm flex items-center gap-3 hover:bg-slate-200 transition-all border border-slate-200">
+            <History className="w-5 h-5" /> 生成历史记录
+          </button>
+          <button onClick={async () => { /* @ts-ignore */ await window.aistudio.openSelectKey(); }} className="px-8 py-4 bg-black text-white rounded-2xl font-black text-sm hover:scale-105 transition-all shadow-xl">鉴权中心</button>
+        </div>
       </header>
 
-      {/* STEP 1: UPLOAD */}
+      {/* STEP 1: UPLOAD AREA */}
       <section className="bg-slate-50 p-12 rounded-[3.5rem] border border-slate-100 shadow-sm w-full">
         <div className="flex flex-col md:flex-row md:items-center justify-between mb-12 gap-6">
           <div className="flex items-center gap-6">
             <span className="w-16 h-16 rounded-[2rem] bg-black text-white flex items-center justify-center text-2xl font-black">01</span>
-            <h2 className="text-4xl font-black">上传产品原型</h2>
+            <h2 className="text-4xl font-black">参考资料上传</h2>
           </div>
           <div className="px-6 py-3 bg-white rounded-2xl border border-slate-200 text-slate-500 font-bold text-sm">
-            首张图将被设定为物理结构锁定的唯一参考源
+            首张图为结构锁定的核心源
           </div>
         </div>
-        
+
         <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 lg:grid-cols-6 gap-8 mb-12">
           {images.map((img, i) => (
-            <div key={img.id} className={`relative aspect-[3/4] rounded-[2.5rem] overflow-hidden border-4 transition-all ${i === 0 ? 'border-black ring-8 ring-black/5 shadow-2xl scale-105 z-10' : 'border-white shadow-md'}`}>
-              <img src={img.data} className="w-full h-full object-cover" alt="ref" />
-              <div className="absolute inset-x-0 bottom-0 p-6 bg-gradient-to-t from-black/80 to-transparent">
-                <span className="text-white font-black text-xs tracking-widest uppercase">{i === 0 ? '结构核心源' : `视角 ${i+1}`}</span>
+            <div key={img.id} className={`relative aspect-square rounded-[2rem] overflow-hidden border-4 transition-all ${i === 0 ? 'border-black ring-8 ring-black/5 shadow-2xl scale-105 z-10' : 'border-white shadow-md'}`}>
+              {img.type === 'video' ? (
+                <div className="w-full h-full bg-slate-200 flex items-center justify-center">
+                   <Video className="w-10 h-10 text-slate-400" />
+                </div>
+              ) : (
+                <img src={img.data} className="w-full h-full object-cover" />
+              )}
+              <div className="absolute inset-x-0 bottom-0 p-4 bg-gradient-to-t from-black/80 to-transparent">
+                <span className="text-white font-black text-[10px] tracking-widest uppercase">{i === 0 ? '结构核心' : img.type === 'video' ? '参考视频' : '参考视角'}</span>
               </div>
-              <button onClick={() => removeImage(img.id)} className="absolute top-4 right-4 bg-red-500 text-white p-2.5 rounded-2xl opacity-0 group-hover:opacity-100 transition-all hover:scale-110 active:scale-90">
-                <Trash2 className="w-5 h-5" />
+              <button onClick={() => removeImage(img.id)} className="absolute top-2 right-2 bg-red-500 text-white p-2 rounded-xl">
+                <Trash2 className="w-4 h-4" />
               </button>
             </div>
           ))}
           {images.length < 12 && (
-            <label className="aspect-[3/4] flex flex-col items-center justify-center border-4 border-dashed border-slate-200 rounded-[2.5rem] cursor-pointer hover:bg-white hover:border-black transition-all group">
-              <Camera className="w-12 h-12 text-slate-300 group-hover:text-black transition-colors" />
-              <span className="mt-6 text-sm font-black text-slate-400 uppercase tracking-widest group-hover:text-black">点击上传</span>
-              <input type="file" className="hidden" accept="image/*" multiple onChange={handleFileUpload} />
-            </label>
+            <>
+              <label className="aspect-square flex flex-col items-center justify-center border-4 border-dashed border-slate-200 rounded-[2rem] cursor-pointer hover:bg-white hover:border-black transition-all group">
+                <Camera className="w-10 h-10 text-slate-300 group-hover:text-black" />
+                <span className="mt-4 text-[10px] font-black text-slate-400 uppercase tracking-widest group-hover:text-black">传图</span>
+                <input type="file" className="hidden" accept="image/*" multiple onChange={(e) => handleFileUpload(e, 'image')} />
+              </label>
+              <label className="aspect-square flex flex-col items-center justify-center border-4 border-dashed border-slate-200 rounded-[2rem] cursor-pointer hover:bg-white hover:border-blue-500 transition-all group">
+                <Video className="w-10 h-10 text-slate-300 group-hover:text-blue-500" />
+                <span className="mt-4 text-[10px] font-black text-slate-400 uppercase tracking-widest group-hover:text-blue-500">传视频</span>
+                <input type="file" className="hidden" accept="video/mp4,video/quicktime" multiple onChange={(e) => handleFileUpload(e, 'video')} />
+              </label>
+            </>
           )}
         </div>
 
+        {/* PRODUCT NAME INPUT MOVED HERE */}
+        <div className="mb-12">
+          <label className="text-xs font-black uppercase tracking-[0.2em] text-slate-400 mb-4 block">产品名称</label>
+          <input 
+            type="text" 
+            placeholder="请输入产品名称，如：扭腰机" 
+            className="w-full p-8 text-3xl font-black bg-white border-4 border-slate-100 rounded-[2.5rem] outline-none focus:border-black transition-all shadow-inner"
+            value={productName}
+            onChange={(e) => setProductName(e.target.value)}
+          />
+        </div>
+
         <button 
-          disabled={images.length === 0 || state === AppState.ANALYZING_INDIVIDUAL}
+          disabled={images.length === 0 || !productName || state === AppState.ANALYZING_INDIVIDUAL}
           onClick={startIndividualAnalysis}
           className="w-full py-8 rounded-[2.5rem] bg-black text-white font-black text-2xl flex items-center justify-center gap-6 hover:scale-[1.005] active:scale-[0.98] transition-all shadow-2xl disabled:bg-slate-200 disabled:shadow-none"
         >
-          {state === AppState.ANALYZING_INDIVIDUAL ? <Loader2 className="w-10 h-10 animate-spin" /> : <><Search className="w-10 h-10" /> 深度扫描产品基因</>}
+          {state === AppState.ANALYZING_INDIVIDUAL ? <Loader2 className="w-10 h-10 animate-spin" /> : <><Search className="w-10 h-10" /> 深度扫描产线资产</>}
         </button>
       </section>
 
-      {/* STEP 2: ANALYSIS */}
+      {/* ANALYSIS RESULTS */}
       {analysis && analysis.individualAnalyses.length > 0 && (
         <section className="bg-slate-50 p-12 rounded-[3.5rem] border border-slate-100 animate-in slide-in-from-bottom-12 w-full">
           <div className="flex items-center gap-6 mb-12">
             <span className="w-16 h-16 rounded-[2rem] bg-indigo-600 text-white flex items-center justify-center text-2xl font-black">02</span>
-            <h2 className="text-4xl font-black">视角拆解</h2>
+            <h2 className="text-4xl font-black">资产解析结果</h2>
           </div>
           <div className="space-y-8">
             {analysis.individualAnalyses.map((item, idx) => (
-              <div key={item.id} className="flex flex-col lg:flex-row gap-10 p-10 bg-white rounded-[3rem] shadow-sm items-start border border-slate-100">
-                <div className="w-full lg:w-48 aspect-square rounded-[2rem] overflow-hidden border-4 border-slate-50 flex-shrink-0">
-                  <img src={images.find(img => img.id === item.id)?.data} className="w-full h-full object-cover" />
+              <div key={item.id} className="flex flex-col lg:flex-row gap-8 p-8 bg-white rounded-[3rem] shadow-sm items-start border border-slate-100">
+                <div className="w-full lg:w-40 aspect-square rounded-[2rem] overflow-hidden border-4 border-slate-50 flex-shrink-0">
+                  {images.find(i => i.id === item.id)?.type === 'video' ? <Video className="w-full h-full p-10 text-slate-300" /> : <img src={images.find(img => img.id === item.id)?.data} className="w-full h-full object-cover" />}
                 </div>
-                <div className="flex-grow w-full">
-                  <textarea 
-                    className="w-full p-8 text-xl font-bold bg-slate-50 border-0 rounded-3xl focus:ring-8 focus:ring-indigo-50 outline-none resize-none min-h-[120px] leading-relaxed"
-                    value={item.description}
-                    onChange={(e) => {
-                      const n = [...analysis.individualAnalyses];
-                      n[idx].description = e.target.value;
-                      setAnalysis({...analysis, individualAnalyses: n});
-                    }}
-                  />
-                </div>
+                <textarea 
+                  className="w-full p-6 text-xl font-bold bg-slate-50 border-0 rounded-3xl focus:ring-4 focus:ring-indigo-50 outline-none resize-none min-h-[100px]"
+                  value={item.description}
+                  onChange={(e) => {
+                    const n = [...analysis.individualAnalyses];
+                    n[idx].description = e.target.value;
+                    setAnalysis({...analysis, individualAnalyses: n});
+                  }}
+                />
               </div>
             ))}
           </div>
-          <button disabled={state === AppState.ANALYZING_GLOBAL} onClick={startGlobalSynthesis} className="w-full mt-12 py-8 rounded-[2.5rem] bg-indigo-600 text-white font-black text-2xl flex items-center justify-center gap-6 hover:scale-[1.005] transition-all shadow-xl active:scale-[0.98]">
-            {state === AppState.ANALYZING_GLOBAL ? <Loader2 className="w-10 h-10 animate-spin" /> : <><Zap className="w-10 h-10" /> 生成全局档案</>}
+          <button disabled={state === AppState.ANALYZING_GLOBAL} onClick={startGlobalSynthesis} className="w-full mt-12 py-8 rounded-[2.5rem] bg-indigo-600 text-white font-black text-2xl flex items-center justify-center gap-6 hover:scale-[1.005] shadow-xl">
+            {state === AppState.ANALYZING_GLOBAL ? <Loader2 className="w-10 h-10 animate-spin" /> : <><Zap className="w-10 h-10" /> 提炼全局基因</>}
           </button>
         </section>
       )}
 
-      {/* STEP 3: CONFIG */}
+      {/* STORYBOARD CONFIG */}
       {analysis && (state === AppState.EDITING_GLOBAL || state === AppState.GENERATING_PROMPTS || state === AppState.COMPLETED) && (
         <section className="bg-slate-50 p-12 rounded-[3.5rem] border border-slate-100 animate-in slide-in-from-bottom-12 w-full">
           <div className="flex items-center gap-6 mb-12">
             <span className="w-16 h-16 rounded-[2rem] bg-emerald-600 text-white flex items-center justify-center text-2xl font-black">03</span>
-            <h2 className="text-4xl font-black">全局策略配置</h2>
+            <h2 className="text-4xl font-black">分镜产线配置</h2>
           </div>
           <div className="bg-white p-12 rounded-[3rem] shadow-sm mb-12 space-y-12">
             <div>
-              <label className="text-xs font-black uppercase tracking-[0.2em] text-slate-400 mb-6 block">产品结构与交互基调</label>
+              <label className="text-xs font-black uppercase tracking-[0.2em] text-slate-400 mb-6 block">产品结构与交互锁定</label>
               <textarea 
-                className="w-full p-10 text-2xl font-black bg-slate-50 border-0 rounded-[2.5rem] focus:ring-8 focus:ring-emerald-50 min-h-[160px] leading-snug" 
+                className="w-full p-8 text-2xl font-black bg-slate-50 border-0 rounded-[2rem] focus:ring-8 focus:ring-emerald-50 min-h-[140px]" 
                 value={analysis.globalProfile.details} 
                 onChange={e => setAnalysis({...analysis, globalProfile: {...analysis.globalProfile, details: e.target.value}})} 
               />
             </div>
-            
             <div className="flex flex-col xl:flex-row gap-12">
               <div className="flex-1 space-y-8">
-                <label className="text-xs font-black uppercase tracking-[0.2em] text-slate-400 block">商业场景</label>
+                <label className="text-xs font-black uppercase tracking-[0.2em] text-slate-400 block">商业场景定位</label>
                 <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
                   {SCENE_OPTIONS.map(opt => (
                     <button key={opt} onClick={() => setSceneType(opt)} className={`py-6 px-4 rounded-3xl text-sm font-black border-4 transition-all ${sceneType === opt ? 'bg-emerald-600 border-emerald-600 text-white shadow-xl scale-105' : 'bg-white border-slate-100 text-slate-400 hover:border-emerald-200'}`}>{opt}</button>
@@ -402,47 +486,44 @@ const App: React.FC = () => {
                 </div>
               </div>
               <div className="flex-1 space-y-8">
-                <label className="text-xs font-black uppercase tracking-[0.2em] text-slate-400 block">产出设置</label>
+                <label className="text-xs font-black uppercase tracking-[0.2em] text-slate-400 block">生成份数 (1-50)</label>
                 <div className="flex flex-col sm:flex-row items-center gap-8">
-                  <div className="flex bg-slate-100 p-2.5 rounded-[2rem] w-full">
-                    <button onClick={() => setLanguage('zh')} className={`flex-1 py-5 text-sm font-black rounded-2xl ${language === 'zh' ? 'bg-white shadow-lg text-emerald-600' : 'text-slate-400'}`}>中文</button>
-                    <button onClick={() => setLanguage('en')} className={`flex-1 py-5 text-sm font-black rounded-2xl ${language === 'en' ? 'bg-white shadow-lg text-emerald-600' : 'text-slate-400'}`}>ENG</button>
+                  <div className="flex bg-slate-100 p-2 rounded-[2rem] w-full">
+                    <button onClick={() => setLanguage('zh')} className={`flex-1 py-4 text-sm font-black rounded-2xl ${language === 'zh' ? 'bg-white shadow-lg text-emerald-600' : 'text-slate-400'}`}>中文策划</button>
+                    <button onClick={() => setLanguage('en')} className={`flex-1 py-4 text-sm font-black rounded-2xl ${language === 'en' ? 'bg-white shadow-lg text-emerald-600' : 'text-slate-400'}`}>ENG Creative</button>
                   </div>
-                  <div className="flex items-center gap-6 bg-slate-100 px-10 py-5 rounded-[2rem]">
-                    <span className="text-sm font-black text-slate-400 uppercase">份数</span>
-                    <input type="number" min="1" max="50" value={promptCount} onChange={e => setPromptCount(Math.min(50, Math.max(1, parseInt(e.target.value) || 1)))} className="w-16 bg-transparent text-center text-2xl font-black outline-none border-b-4 border-emerald-300 text-emerald-600" />
-                  </div>
+                  <input type="number" min="1" max="50" value={promptCount} onChange={e => setPromptCount(Math.min(50, Math.max(1, parseInt(e.target.value) || 1)))} className="w-24 bg-slate-100 p-4 text-center text-2xl font-black rounded-[2rem] outline-none border-4 border-transparent focus:border-emerald-300 text-emerald-600" />
                 </div>
               </div>
             </div>
           </div>
           <button onClick={startPromptGeneration} disabled={state === AppState.GENERATING_PROMPTS} className="w-full py-8 rounded-[2.5rem] bg-emerald-600 text-white font-black text-2xl flex items-center justify-center gap-6 hover:scale-[1.005] shadow-2xl transition-all">
-            {state === AppState.GENERATING_PROMPTS ? <Loader2 className="w-10 h-10 animate-spin" /> : <><Settings2 className="w-10 h-10" /> 立即策划分镜</>}
+            {state === AppState.GENERATING_PROMPTS ? <Loader2 className="w-10 h-10 animate-spin" /> : <><Settings2 className="w-10 h-10" /> 立即启动分镜生产</>}
           </button>
         </section>
       )}
 
-      {/* STEP 4: OUTPUTS */}
+      {/* FINAL OUTPUT AREA */}
       {generatedPrompts.length > 0 && (
         <section className="space-y-16 animate-in fade-in duration-1000 w-full">
           <div className="bg-black p-12 rounded-[4rem] text-white flex flex-col xl:flex-row items-center justify-between gap-12 shadow-2xl">
             <div className="space-y-4 text-center xl:text-left">
               <h2 className="text-4xl font-black flex items-center justify-center xl:justify-start gap-6">
                 <Package className="w-12 h-12 text-emerald-400" />
-                分镜工厂产线
+                资产总览看板
               </h2>
-              <p className="text-slate-500 font-bold text-lg">当前已生成 {generatedPrompts.length} 套独立方案，支持分镜级别在线微调</p>
+              <p className="text-slate-500 font-bold text-lg">产品：{productName} | 已生产 {generatedPrompts.length} 套方案</p>
             </div>
             <div className="flex flex-wrap items-center justify-center gap-6">
-              <button onClick={downloadPromptsAsCSV} className="px-10 py-5 bg-white text-black rounded-[2rem] font-black text-lg flex items-center gap-4 hover:scale-105 transition-all">
-                <FileDown className="w-6 h-6" /> 导出表格
+              <button onClick={downloadPromptsAsCSV} className="px-10 py-5 bg-white text-black rounded-[2rem] font-black text-lg flex items-center gap-4 hover:scale-105 transition-all shadow-lg">
+                <FileDown className="w-6 h-6" /> 导出 CSV 表格
               </button>
-              <button onClick={startGenerateAllImages} disabled={state === AppState.GENERATING_IMAGE} className="px-10 py-5 bg-emerald-500 text-black rounded-[2rem] font-black text-lg flex items-center gap-4 hover:scale-105 transition-all">
-                {batchProgress ? <><Loader2 className="w-6 h-6 animate-spin" /> {batchProgress.current}/{batchProgress.total}</> : <><Layers className="w-6 h-6" /> 一键渲染全部</>}
+              <button onClick={startGenerateAllImages} disabled={state === AppState.GENERATING_IMAGE} className="px-10 py-5 bg-emerald-500 text-black rounded-[2rem] font-black text-lg flex items-center gap-4 hover:scale-105 transition-all shadow-lg">
+                {batchProgress ? <><Loader2 className="w-6 h-6 animate-spin" /> {batchProgress.current}/{batchProgress.total}</> : <><Layers className="w-6 h-6" /> 一键渲染所有九宫格</>}
               </button>
               {Object.keys(renderedImages).length > 0 && (
-                <button onClick={downloadAllRenderedImages} className="px-10 py-5 bg-indigo-500 text-white rounded-[2rem] font-black text-lg flex items-center gap-4 hover:scale-105 transition-all">
-                  <Download className="w-6 h-6" /> 批量下载大图
+                <button onClick={downloadAllRenderedImages} className="px-10 py-5 bg-indigo-500 text-white rounded-[2rem] font-black text-lg flex items-center gap-4 hover:scale-105 transition-all shadow-lg">
+                  <Download className="w-6 h-6" /> 批量下载成品图
                 </button>
               )}
             </div>
@@ -454,96 +535,85 @@ const App: React.FC = () => {
                 <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-10">
                   <div className="flex items-center gap-8">
                     <span className="w-16 h-16 rounded-[2rem] bg-slate-900 text-white flex items-center justify-center text-2xl font-black">#{idx + 1}</span>
-                    <h3 className="text-3xl font-black tracking-tight">方案详情 (点击文本可直接修改)</h3>
+                    <div className="flex flex-col">
+                       <h3 className="text-2xl font-black tracking-tight">{getSerialID(idx)}</h3>
+                       <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Storyboard Scheme</span>
+                    </div>
                   </div>
-                  <div className="flex flex-wrap gap-4">
+                  <div className="flex gap-4">
                     <button onClick={() => renderSingleImage(idx)} className="px-8 py-4 bg-black text-white rounded-2xl font-black text-xs hover:scale-105 transition-all flex items-center gap-3">
-                      {state === AppState.GENERATING_IMAGE ? <Loader2 className="w-4 h-4 animate-spin" /> : <><RefreshCw className="w-4 h-4" /> 重新渲染九宫格</>}
+                       {state === AppState.GENERATING_IMAGE ? <Loader2 className="w-4 h-4 animate-spin" /> : <><RefreshCw className="w-4 h-4" /> 渲染此方案</>}
                     </button>
                   </div>
                 </div>
 
-                <div className="space-y-12">
-                  {/* EDITABLE PROMPTS */}
-                  <div className="bg-slate-50 p-12 rounded-[3rem] border border-slate-100">
-                    <div className="mb-10">
-                      <label className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400 mb-4 block">全局九宫格指令</label>
-                      <textarea 
-                        className="w-full p-6 text-lg font-bold bg-white border-2 border-transparent rounded-3xl focus:border-emerald-500 outline-none resize-none leading-relaxed italic shadow-sm"
-                        value={p.instruction}
-                        rows={2}
-                        onChange={(e) => handleInstructionEdit(idx, e.target.value)}
-                      />
-                    </div>
-                    
-                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">
-                      {p.shots.map((shotContent, si) => (
-                        <div key={si} className="bg-white p-8 rounded-3xl border border-slate-100 shadow-sm focus-within:ring-4 focus-within:ring-emerald-50 transition-all">
-                          <div className="flex items-center justify-between mb-4">
-                            <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">镜头 0{si+1}</span>
-                            <button onClick={() => copyToClipboard(shotContent, `shot-${idx}-${si}`)} className="p-1 hover:text-emerald-500 text-slate-300">
-                               {copyStates[`shot-${idx}-${si}`] ? <Check className="w-3 h-3 text-emerald-500" /> : <Copy className="w-3 h-3" />}
-                            </button>
+                <div className="space-y-12 bg-slate-50 p-12 rounded-[3rem] border border-slate-100">
+                  <div>
+                    <label className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400 mb-4 block">主指令内容</label>
+                    <textarea 
+                      className="w-full p-6 text-lg font-bold bg-white border-2 border-transparent rounded-3xl focus:border-emerald-500 outline-none resize-none leading-relaxed italic shadow-sm"
+                      value={p.instruction}
+                      rows={2}
+                      onChange={(e) => handleInstructionEdit(idx, e.target.value)}
+                    />
+                  </div>
+                  
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">
+                    {p.shots.map((shotContent, si) => (
+                      <div key={si} className="bg-white p-8 rounded-3xl border border-slate-100 shadow-sm transition-all focus-within:border-emerald-500">
+                        <div className="flex items-center justify-between mb-4">
+                          <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">分镜 0{si+1}</span>
+                          <button onClick={() => copyToClipboard(shotContent, `shot-${idx}-${si}`)} className="p-1 text-slate-300 hover:text-emerald-500">
+                             {copyStates[`shot-${idx}-${si}`] ? <Check className="w-3 h-3 text-emerald-500" /> : <Copy className="w-3 h-3" />}
+                          </button>
+                        </div>
+                        <textarea 
+                          className="w-full p-2 text-sm font-medium text-slate-700 bg-transparent border-0 outline-none resize-none min-h-[100px]"
+                          value={shotContent}
+                          onChange={(e) => handleShotEdit(idx, si, e.target.value)}
+                        />
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 xl:grid-cols-2 gap-12">
+                  {renderedImages[idx] && (
+                    <div className="space-y-8">
+                       <div className="flex items-center justify-between">
+                          <h4 className="text-sm font-black uppercase text-slate-400 tracking-widest">渲染预览</h4>
+                          <div className="flex gap-4">
+                             <button onClick={() => setZoomImage(renderedImages[idx])} className="px-4 py-2 bg-slate-100 rounded-xl text-[10px] font-black flex items-center gap-2 hover:bg-slate-200">
+                               <Maximize2 className="w-3.5 h-3.5" /> 放大查看
+                             </button>
+                             <button onClick={() => splitImageIntoNine(renderedImages[idx], getSerialID(idx))} className="px-4 py-2 bg-emerald-50 text-emerald-600 rounded-xl text-[10px] font-black flex items-center gap-2 hover:bg-emerald-100">
+                               <Scissors className="w-3.5 h-3.5" /> 拆解小图
+                             </button>
                           </div>
-                          <textarea 
-                            className="w-full p-2 text-sm font-medium text-slate-700 bg-transparent border-0 outline-none resize-none min-h-[80px]"
-                            value={shotContent}
-                            onChange={(e) => handleShotEdit(idx, si, e.target.value)}
-                          />
-                        </div>
-                      ))}
+                       </div>
+                       <div className="aspect-video bg-slate-900 rounded-[3rem] overflow-hidden border-8 border-white shadow-2xl cursor-zoom-in" onClick={() => setZoomImage(renderedImages[idx])}>
+                          <img src={renderedImages[idx]} className="w-full h-full object-cover" />
+                       </div>
                     </div>
-                  </div>
-
-                  {/* MEDIA SECTION */}
-                  <div className="grid grid-cols-1 xl:grid-cols-2 gap-12">
-                    {renderedImages[idx] && (
-                      <div className="space-y-8">
-                         <div className="flex items-center justify-between">
-                            <h4 className="text-sm font-black uppercase text-slate-400 tracking-widest">渲染成品预览</h4>
-                            <div className="flex gap-4">
-                               <button onClick={() => setZoomImage(renderedImages[idx])} className="px-4 py-2 bg-slate-100 rounded-xl text-[10px] font-black flex items-center gap-2 hover:bg-slate-200">
-                                 <Maximize2 className="w-3.5 h-3.5" /> 放大查看
-                               </button>
-                               <button onClick={() => splitImageIntoNine(renderedImages[idx], `scheme_${idx+1}`)} className="px-4 py-2 bg-emerald-50 text-emerald-600 rounded-xl text-[10px] font-black flex items-center gap-2 hover:bg-emerald-100">
-                                 <Scissors className="w-3.5 h-3.5" /> 拆解为9张小图
-                               </button>
-                            </div>
-                         </div>
-                         <div className="aspect-video bg-slate-900 rounded-[3rem] overflow-hidden border-8 border-white shadow-2xl group cursor-zoom-in" onClick={() => setZoomImage(renderedImages[idx])}>
-                            <img src={renderedImages[idx]} className="w-full h-full object-cover transition-transform duration-700 group-hover:scale-105" />
-                         </div>
+                  )}
+                  {renderedImages[idx] && (
+                    <div className="space-y-8">
+                      <div className="flex items-center justify-between">
+                         <h4 className="text-sm font-black uppercase text-slate-400 tracking-widest">动态视频产出</h4>
+                         <button onClick={() => generateSingleVideo(idx)} disabled={state === AppState.GENERATING_VIDEO} className="px-6 py-2 bg-blue-600 text-white rounded-xl text-[10px] font-black hover:bg-blue-700">
+                           {state === AppState.GENERATING_VIDEO ? <Loader2 className="w-3 h-3 animate-spin" /> : '驱动 Veo 生成'}
+                         </button>
                       </div>
-                    )}
-
-                    {renderedImages[idx] && (
-                      <div className="space-y-8">
-                        <div className="flex items-center justify-between">
-                           <h4 className="text-sm font-black uppercase text-slate-400 tracking-widest">视频资产工厂</h4>
-                           <div className="flex items-center gap-4 bg-blue-50 px-4 py-2 rounded-2xl border border-blue-100">
-                              <input type="number" min="1" max="10" value={videoCount} onChange={e => setVideoCount(Math.max(1, parseInt(e.target.value) || 1))} className="w-8 bg-transparent text-center font-black outline-none border-b-2 border-blue-200 text-blue-600" />
-                              <button onClick={() => generateSingleVideo(idx)} disabled={state === AppState.GENERATING_VIDEO} className="px-4 py-2 bg-blue-600 text-white rounded-xl text-[10px] font-black hover:bg-blue-700">
-                                {state === AppState.GENERATING_VIDEO ? <Loader2 className="w-3 h-3 animate-spin" /> : '生成视频'}
-                              </button>
-                           </div>
-                        </div>
-                        <div className="grid grid-cols-1 gap-8">
-                          {(videoResults[idx] || []).map((v, vi) => (
-                            <div key={v.id} className="aspect-video bg-black rounded-[2.5rem] overflow-hidden shadow-xl border-4 border-slate-50 relative group">
-                              <video src={v.url} controls className="w-full h-full object-cover" />
-                              <a href={v.url} download={`video_${idx+1}_${vi+1}.mp4`} className="absolute bottom-6 right-6 p-4 bg-white text-blue-600 rounded-full opacity-0 group-hover:opacity-100 transition-all hover:scale-110 shadow-2xl"><Download className="w-6 h-6" /></a>
-                            </div>
-                          ))}
-                          {(!videoResults[idx] || videoResults[idx].length === 0) && (
-                            <div className="aspect-video bg-slate-50 rounded-[2.5rem] border-4 border-dashed border-slate-100 flex flex-col items-center justify-center text-slate-200 gap-4">
-                               <Video className="w-12 h-12" />
-                               <span className="text-[10px] font-black uppercase tracking-widest">就绪</span>
-                            </div>
-                          )}
-                        </div>
+                      <div className="grid grid-cols-1 gap-8">
+                        {(videoResults[idx] || []).map((v, vi) => (
+                          <div key={v.id} className="aspect-video bg-black rounded-[2.5rem] overflow-hidden shadow-xl border-4 border-slate-50 relative group">
+                            <video src={v.url} controls className="w-full h-full object-cover" />
+                            <a href={v.url} download={`${productName}_${idx+1}_video_${vi+1}.mp4`} className="absolute bottom-6 right-6 p-4 bg-white text-blue-600 rounded-full opacity-0 group-hover:opacity-100 transition-all shadow-2xl"><Download className="w-6 h-6" /></a>
+                          </div>
+                        ))}
                       </div>
-                    )}
-                  </div>
+                    </div>
+                  )}
                 </div>
               </div>
             ))}
@@ -557,16 +627,57 @@ const App: React.FC = () => {
            <button onClick={() => setZoomImage(null)} className="absolute top-8 right-8 text-white p-4 hover:bg-white/10 rounded-full transition-all">
              <X className="w-10 h-10" />
            </button>
-           <div className="w-full h-full max-w-7xl max-h-[85vh] flex items-center justify-center">
-             <img src={zoomImage} className="max-w-full max-h-full object-contain rounded-xl shadow-[0_0_100px_rgba(255,255,255,0.1)]" />
-           </div>
-           <div className="absolute bottom-12 flex gap-6">
-              <button onClick={() => splitImageIntoNine(zoomImage, 'zoomed')} className="px-8 py-4 bg-emerald-500 text-black font-black rounded-2xl flex items-center gap-3 hover:scale-105 transition-all">
-                <Scissors className="w-5 h-5" /> 立即切图下载
-              </button>
-              <a href={zoomImage} download="large_storyboard.png" className="px-8 py-4 bg-white text-black font-black rounded-2xl flex items-center gap-3 hover:scale-105 transition-all">
-                <Download className="w-5 h-5" /> 下载全图
-              </a>
+           <img src={zoomImage} className="max-w-full max-h-full object-contain rounded-xl shadow-[0_0_100px_rgba(255,255,255,0.1)]" />
+        </div>
+      )}
+
+      {/* HISTORY MODAL */}
+      {showHistory && (
+        <div className="fixed inset-0 z-[120] flex items-center justify-center p-6 bg-black/70 backdrop-blur-md animate-in fade-in">
+           <div className="bg-white w-full max-w-4xl max-h-[85vh] rounded-[3.5rem] shadow-2xl overflow-hidden flex flex-col">
+              <div className="p-10 border-b border-slate-100 flex items-center justify-between bg-slate-50">
+                 <div className="flex items-center gap-6">
+                   <div className="p-4 bg-indigo-600 rounded-2xl text-white">
+                      <History className="w-8 h-8" />
+                   </div>
+                   <h3 className="text-3xl font-black text-slate-900 tracking-tight">产品分镜历史库</h3>
+                 </div>
+                 <button onClick={() => setShowHistory(false)} className="p-4 bg-white border border-slate-200 rounded-2xl hover:bg-slate-50">
+                    <X className="w-6 h-6" />
+                 </button>
+              </div>
+              <div className="flex-1 overflow-y-auto p-10 space-y-6">
+                 {history.length === 0 ? (
+                    <div className="py-20 text-center text-slate-300">
+                       <Clock className="w-16 h-16 mx-auto mb-6 opacity-20" />
+                       <p className="text-xl font-bold">暂无历史生产记录</p>
+                    </div>
+                 ) : (
+                    history.map(record => (
+                       <div key={record.id} className="p-8 bg-slate-50 rounded-[2.5rem] border border-slate-100 flex items-center justify-between group hover:border-indigo-200 transition-all cursor-pointer" onClick={() => loadHistoryRecord(record)}>
+                          <div className="flex items-center gap-8">
+                             <div className="w-24 h-24 rounded-2xl overflow-hidden border-2 border-white shadow-md bg-white">
+                                <img src={record.referenceImage} className="w-full h-full object-cover" />
+                             </div>
+                             <div>
+                                <h4 className="text-2xl font-black text-slate-900 mb-1">{record.productName}</h4>
+                                <div className="flex items-center gap-4 text-slate-400 text-xs font-bold uppercase tracking-widest">
+                                   <span>{new Date(record.timestamp).toLocaleString()}</span>
+                                   <span>•</span>
+                                   <span>{record.prompts.length} 套方案</span>
+                                </div>
+                             </div>
+                          </div>
+                          <div className="p-4 bg-white rounded-2xl shadow-sm text-indigo-600 opacity-0 group-hover:opacity-100 transition-all translate-x-4 group-hover:translate-x-0">
+                             <ChevronRight className="w-6 h-6" />
+                          </div>
+                       </div>
+                    ))
+                 )}
+              </div>
+              <div className="p-10 border-t border-slate-100 flex justify-end gap-6 bg-slate-50">
+                 <button onClick={clearHistory} className="px-8 py-4 bg-red-50 text-red-600 rounded-2xl font-black text-xs hover:bg-red-100">清空所有记录</button>
+              </div>
            </div>
         </div>
       )}
@@ -576,25 +687,25 @@ const App: React.FC = () => {
         <div className="flex items-center gap-6">
           <div className={`w-3 h-3 rounded-full animate-pulse ${state === AppState.IDLE ? 'bg-slate-300' : 'bg-emerald-500'}`}></div>
           <div className="flex flex-col">
-            <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">系统状态</span>
+            <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">产线动态</span>
             <span className="text-xs font-black text-slate-900 tracking-tight">
-              {state === AppState.GENERATING_IMAGE ? '正在同步渲染分镜九宫格...' : 
+              {state === AppState.GENERATING_IMAGE ? '正在批量生产资产...' : 
                state === AppState.GENERATING_VIDEO ? videoStatus || '正在渲染动态流...' : 
-               '工厂待命中 (结构锁定激活)'}
+               '产线就绪 (Structural Lock Enabled)'}
             </span>
           </div>
         </div>
-        <button onClick={async () => { /* @ts-ignore */ await window.aistudio.openSelectKey(); }} className="px-6 py-3 bg-black text-white rounded-2xl font-black text-xs hover:bg-zinc-800 transition-all flex items-center gap-3">
-          <Key className="w-4 h-4" /> 鉴权中心
-        </button>
+        <div className="hidden md:flex items-center gap-4 px-6 py-2 bg-indigo-50 border border-indigo-100 rounded-2xl text-[10px] font-black text-indigo-600 uppercase tracking-widest">
+           <Clock className="w-3.5 h-3.5" /> 自动保存已激活
+        </div>
       </footer>
 
       {error && (
-        <div className="fixed inset-0 z-[120] flex items-center justify-center p-6 bg-black/50 backdrop-blur-sm">
-           <div className="bg-white p-12 rounded-[3.5rem] shadow-2xl max-w-lg w-full text-center space-y-8">
-              <h3 className="text-3xl font-black text-slate-900">操作异常</h3>
-              <p className="text-slate-500 text-lg font-medium">{error}</p>
-              <button onClick={() => setError(null)} className="w-full py-6 bg-black text-white rounded-3xl font-black text-xl hover:bg-zinc-800">关闭</button>
+        <div className="fixed inset-0 z-[130] flex items-center justify-center p-6 bg-black/50 backdrop-blur-sm">
+           <div className="bg-white p-10 rounded-[3rem] shadow-2xl max-w-sm w-full text-center space-y-6">
+              <h3 className="text-2xl font-black text-slate-900">提示</h3>
+              <p className="text-slate-500 font-medium">{error}</p>
+              <button onClick={() => setError(null)} className="w-full py-5 bg-black text-white rounded-2xl font-black text-lg">确认</button>
            </div>
         </div>
       )}

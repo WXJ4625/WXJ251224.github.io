@@ -9,6 +9,20 @@ export interface VideoResult {
   id: string;
 }
 
+export interface ProductPrompt {
+  instruction: string;
+  shots: string[];
+}
+
+export interface HistoryRecord {
+  id: string;
+  timestamp: number;
+  productName: string;
+  referenceImage: string;
+  prompts: ProductPrompt[];
+  analysis: ProductAnalysis;
+}
+
 export interface ProductAnalysis {
   individualAnalyses: IndividualAnalysis[];
   globalProfile: {

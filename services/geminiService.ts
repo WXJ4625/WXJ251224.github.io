@@ -3,30 +3,36 @@ import { GoogleGenAI, Type, GenerateContentResponse } from "@google/genai";
 import { ProductAnalysis, IndividualAnalysis, SceneType } from "../types";
 
 /**
- * 分析每一张参考图的具体内容
+ * 分析每一张参考图或视频的具体内容
  */
-export const analyzeIndividualImages = async (images: {id: string, data: string}[]): Promise<IndividualAnalysis[]> => {
+export const analyzeIndividualImages = async (
+  images: {id: string, data: string, type: 'image' | 'video'}[],
+  productName: string
+): Promise<IndividualAnalysis[]> => {
   const ai = new GoogleGenAI({ apiKey: process.env.API_KEY as string });
   const model = 'gemini-3-flash-preview';
 
   const results: IndividualAnalysis[] = [];
 
   for (let i = 0; i < images.length; i++) {
-    const img = images[i];
-    const imagePart = {
+    const item = images[i];
+    const isVideo = item.type === 'video';
+    
+    const mediaPart = {
       inlineData: {
-        data: img.data.split(',')[1],
-        mimeType: 'image/jpeg'
+        data: item.data.split(',')[1],
+        mimeType: isVideo ? 'video/mp4' : 'image/jpeg'
       }
     };
 
-    const prompt = `你正在分析“参考图 ${i + 1}”。请详细描述这张图片中展示的产品部分、结构特征、材质细节以及它呈现的特定功能或角度。
+    const prompt = `你正在分析产品“${productName}”的参考${isVideo ? '视频' : '图'}。请详细描述其中展示的产品部分、结构特征、材质细节以及它呈现的特定功能或角度。
+    如果是视频，请分析整个动态过程中的结构变化。
     请重点捕捉产品的独特设计语言，以便后续生成保持一致性的分镜。
     输出格式为 JSON: { "description": "..." }`;
 
     const response = await ai.models.generateContent({
       model,
-      contents: { parts: [imagePart, { text: prompt }] },
+      contents: { parts: [mediaPart, { text: prompt }] },
       config: {
         responseMimeType: "application/json",
         responseSchema: {
@@ -40,7 +46,7 @@ export const analyzeIndividualImages = async (images: {id: string, data: string}
     });
 
     const parsed = JSON.parse(response.text || '{"description": "无法识别"}');
-    results.push({ id: img.id, description: parsed.description });
+    results.push({ id: item.id, description: parsed.description });
   }
 
   return results;
@@ -49,12 +55,15 @@ export const analyzeIndividualImages = async (images: {id: string, data: string}
 /**
  * 综合所有参考图分析，推导出全局产品属性
  */
-export const synthesizeProductProfile = async (individualAnalyses: IndividualAnalysis[]): Promise<ProductAnalysis['globalProfile']> => {
+export const synthesizeProductProfile = async (
+  individualAnalyses: IndividualAnalysis[],
+  productName: string
+): Promise<ProductAnalysis['globalProfile']> => {
   const ai = new GoogleGenAI({ apiKey: process.env.API_KEY as string });
   const model = 'gemini-3-flash-preview';
 
-  const context = individualAnalyses.map((a, i) => `参考图 ${i+1} 分析结果: ${a.description}`).join('\n');
-  const prompt = `基于以下对多张产品参考图的独立分析，请综合推导出该产品的全局核心档案。
+  const context = individualAnalyses.map((a, i) => `参考 ${i+1} 分析结果: ${a.description}`).join('\n');
+  const prompt = `基于以下对产品“${productName}”的多张参考资料的分析，请综合推导出该产品的全局核心档案。
   你的目标是提炼出该产品的本质结构和功能特征，确保后续生成的 9 宫格图像能完美继承这些“产品基因”。
 
   ${context}
@@ -91,6 +100,7 @@ export const synthesizeProductProfile = async (individualAnalyses: IndividualAna
  */
 export const generateStoryboards = async (
   profile: ProductAnalysis['globalProfile'], 
+  productName: string,
   quantity: number, 
   language: 'zh' | 'en',
   sceneType: SceneType
@@ -99,21 +109,14 @@ export const generateStoryboards = async (
   const model = 'gemini-3-pro-preview';
 
   const systemInstruction = language === 'zh' 
-    ? `你是一个专业的产品分镜策划师。你擅长根据产品细节，在指定的${sceneType}场景下生成电影级、高凝聚力的3x3网格分镜提示词。
-       重要指令：如果分镜中涉及模特/人物与产品的互动，你必须在每个分镜中详细描述互动细节，包括：
-       1. 模特的肢体动作（如：手指轻扣、掌心承托、双臂环抱、侧脸贴近）。
-       2. 具体的接触点（如：指尖触碰开关、虎口握住手柄、肩膀靠在产品边缘）。
-       3. 互动的具体方向和力度感（如：斜向上方的眼神交流、轻轻按压、向内收紧）。
-       这些细节必须明确以确保AI生成时的物理一致性。`
-    : `You are a professional product storyboard planner. You excel at generating cinematic, highly cohesive 3x3 grid storyboard prompts under the specified ${sceneType} scene setting.
-       CRITICAL INSTRUCTION: If models/humans interact with the product, you MUST detail the interaction in each shot:
-       1. Specific gestures (e.g., fingertips tapping, palms cradling, arms embracing, cheek leaning).
-       2. Specific contact points (e.g., fingertip touching the switch, palm-grip on handle, shoulder leaning on product edge).
-       3. Direction and sense of force (e.g., looking diagonally upwards, gentle pressing, tightening inwards).
-       These details must be explicit to ensure physical consistency in AI generation.`;
+    ? `你是一个专业的产品分镜策划师。你擅长根据产品“${productName}”的细节，在指定的${sceneType}场景下生成电影级、高凝聚力的3x3网格分镜提示词。
+       重要指令：如果分镜中涉及模特/人物与产品的互动，你必须在每个分镜中详细描述互动细节，包括肢体动作、具体的接触点、互动的具体方向和力度感。这些细节必须明确以确保AI生成时的物理一致性。`
+    : `You are a professional product storyboard planner for "${productName}". You excel at generating cinematic, highly cohesive 3x3 grid storyboard prompts under the specified ${sceneType} scene setting.
+       CRITICAL INSTRUCTION: If models/humans interact with the product, you MUST detail the interaction: specific gestures, contact points, and direction/force. These details must be explicit to ensure physical consistency in AI generation.`;
 
   const templatePrompt = `
-    产品核心参数:
+    产品名称: ${productName}
+    核心参数:
     - 视觉细节: ${profile.details}
     - 核心功能: ${profile.usage}
     - 使用逻辑: ${profile.howToUse}
@@ -155,7 +158,7 @@ export const generateStoryboards = async (
 };
 
 /**
- * 生成 9 宫格图片 (引入参考图以锁定产品结构)
+ * 生成 9 宫格图片
  */
 export const generateStoryboardImage = async (prompt: string, referenceImageBase64: string): Promise<string> => {
   const ai = new GoogleGenAI({ apiKey: process.env.API_KEY as string });
