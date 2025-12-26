@@ -3,6 +3,30 @@ import { GoogleGenAI, Type, GenerateContentResponse } from "@google/genai";
 import { ProductAnalysis, IndividualAnalysis, SceneType, ProductPrompt, VideoResolution, VideoAspectRatio } from "../types";
 
 /**
+ * 通用的重试包装函数，支持指数退避
+ */
+async function withRetry<T>(fn: () => Promise<T>, maxRetries = 3, initialDelay = 2000): Promise<T> {
+  let lastError: any;
+  for (let i = 0; i < maxRetries; i++) {
+    try {
+      return await fn();
+    } catch (error: any) {
+      lastError = error;
+      const errorMsg = error?.message || "";
+      // 只有在 429 或 5xx 错误时才重试
+      if (errorMsg.includes("429") || errorMsg.includes("RESOURCE_EXHAUSTED") || errorMsg.includes("500") || errorMsg.includes("503")) {
+        const delay = initialDelay * Math.pow(2, i);
+        console.warn(`检测到频率限制或服务器压力，将在 ${delay}ms 后进行第 ${i + 1} 次重试...`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+        continue;
+      }
+      throw error; // 其他错误直接抛出
+    }
+  }
+  throw lastError;
+}
+
+/**
  * 分析每一张参考图或视频的具体内容
  */
 export const analyzeIndividualImages = async (
@@ -34,7 +58,8 @@ export const analyzeIndividualImages = async (
     输出格式为 JSON: { "description": "..." }`;
 
     try {
-      const response = await ai.models.generateContent({
+      // Fix: Explicitly typing the response to avoid 'unknown' type errors
+      const response: GenerateContentResponse = await withRetry(() => ai.models.generateContent({
         model,
         contents: { parts: [mediaPart, { text: prompt }] },
         config: {
@@ -47,9 +72,15 @@ export const analyzeIndividualImages = async (
             required: ["description"]
           }
         }
-      });
+      }));
+      // Fix: response.text is a property, not a method
       const parsed = JSON.parse(response.text || '{"description": "无法识别"}');
       results.push({ id: item.id, description: String(parsed.description || "无法识别") });
+      
+      // 在处理多个图片时，人为增加一点间隔，减少并发压力
+      if (images.length > 1 && i < images.length - 1) {
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      }
     } catch (e) {
       console.error("Individual image analysis failed", e);
       results.push({ id: item.id, description: "分析失败" });
@@ -85,7 +116,8 @@ export const synthesizeProductProfile = async (
   
   输出格式为 JSON。`;
 
-  const response = await ai.models.generateContent({
+  // Fix: Explicitly typing the response to avoid 'unknown' type errors
+  const response: GenerateContentResponse = await withRetry(() => ai.models.generateContent({
     model,
     contents: prompt,
     config: {
@@ -102,8 +134,9 @@ export const synthesizeProductProfile = async (
         required: ["structure", "details", "audience", "scenarios", "motion"]
       }
     }
-  });
+  }));
 
+  // Fix: response.text is a property
   return JSON.parse(response.text || '{}') as ProductAnalysis['globalProfile'];
 };
 
@@ -120,7 +153,8 @@ export const generateProductProfileFromText = async (
   按以下 5 个维度输出：结构 (Structure)、细节 (Details)、受众 (Audience)、场景 (Scenarios)、运动规律 (Motion)。
   输出格式为 JSON。`;
 
-  const response = await ai.models.generateContent({
+  // Fix: Explicitly typing the response to avoid 'unknown' type errors
+  const response: GenerateContentResponse = await withRetry(() => ai.models.generateContent({
     model,
     contents: prompt,
     config: {
@@ -137,8 +171,9 @@ export const generateProductProfileFromText = async (
         required: ["structure", "details", "audience", "scenarios", "motion"]
       }
     }
-  });
+  }));
 
+  // Fix: response.text is a property
   return JSON.parse(response.text || '{}') as ProductAnalysis['globalProfile'];
 };
 
@@ -174,7 +209,8 @@ export const generateStoryboards = async (
     输出语言：${language === 'zh' ? '中文' : '英文'}。
   `;
 
-  const response = await ai.models.generateContent({
+  // Fix: Explicitly typing the response to avoid 'unknown' type errors
+  const response: GenerateContentResponse = await withRetry(() => ai.models.generateContent({
     model,
     contents: prompt,
     config: {
@@ -203,8 +239,9 @@ export const generateStoryboards = async (
         }
       }
     }
-  });
+  }));
 
+  // Fix: response.text is a property
   return JSON.parse(response.text || '[]') as ProductPrompt[];
 };
 
@@ -230,7 +267,8 @@ export const generateGridImage = async (prompt: string, referenceImageBase64?: s
   Western models. Cinematic lighting. 
   MANDATORY: Maintain 100% product structural and detail consistency across all grid cells based on the provided reference.` });
 
-  const response = await ai.models.generateContent({
+  // Fix: Explicitly typing the response to avoid 'unknown' type errors
+  const response: GenerateContentResponse = await withRetry(() => ai.models.generateContent({
     model: 'gemini-2.5-flash-image',
     contents: { parts: contentsParts },
     config: {
@@ -238,8 +276,9 @@ export const generateGridImage = async (prompt: string, referenceImageBase64?: s
         aspectRatio: "16:9"
       }
     }
-  });
+  }));
 
+  // Fix: Safe access to candidates and iteration over parts to find inlineData
   const part = response.candidates?.[0]?.content?.parts.find(p => p.inlineData);
   if (!part?.inlineData) throw new Error("Image generation failed");
   return `data:image/png;base64,${part.inlineData.data}`;
@@ -247,7 +286,6 @@ export const generateGridImage = async (prompt: string, referenceImageBase64?: s
 
 /**
  * 渲染分镜视频成片
- * Implement video generation with potential extension based on target duration
  */
 export const generateVideoWithExtension = async (
   prompt: string, 
@@ -264,8 +302,8 @@ export const generateVideoWithExtension = async (
   
   onStatusChange?.(`启动 Veo 渲染流水线...`);
 
-  // Initial shot generation with strict consistency
-  let operation = await ai.models.generateVideos({
+  // Fix: Explicitly typing the operation to avoid 'unknown' type errors
+  let operation: any = await withRetry(() => ai.models.generateVideos({
     model: 'veo-3.1-fast-generate-preview',
     prompt: `Industrial high-end commercial video. 
     Product Consistency: The product in this video MUST exactly match the provided reference image in structure, color, and texture at ALL TIMES. Script: ${prompt}`,
@@ -278,7 +316,7 @@ export const generateVideoWithExtension = async (
       resolution: config.resolution,
       aspectRatio: config.aspectRatio
     }
-  });
+  }));
 
   while (!operation.done) {
     onStatusChange?.(`正在进行初始镜头渲染...`);
@@ -288,16 +326,14 @@ export const generateVideoWithExtension = async (
 
   let finalVideo = operation.response?.generatedVideos?.[0]?.video;
 
-  // Extension logic: if requested duration > 5s (standard Veo output is ~5s)
+  // Extension logic
   if (config.targetDuration > 5) {
     onStatusChange?.(`检测到延展需求，正在续写视频...`);
-    // Each extension adds 7s. Calculate rounds.
     const rounds = Math.ceil((config.targetDuration - 5) / 7);
     
     for (let i = 0; i < rounds; i++) {
       onStatusChange?.(`正在进行第 ${i + 1}/${rounds} 阶段延展 (每轮 +7s)...`);
-      // Extension must use 'veo-3.1-generate-preview' and '720p'
-      operation = await ai.models.generateVideos({
+      operation = await withRetry(() => ai.models.generateVideos({
         model: 'veo-3.1-generate-preview',
         prompt: `Continue the scene smoothly while maintaining product structural consistency. ${prompt}`,
         video: finalVideo,
@@ -306,7 +342,7 @@ export const generateVideoWithExtension = async (
           resolution: '720p',
           aspectRatio: config.aspectRatio
         }
-      });
+      }));
 
       while (!operation.done) {
         await new Promise(resolve => setTimeout(resolve, 10000));
@@ -320,6 +356,5 @@ export const generateVideoWithExtension = async (
     throw new Error("Video generation failed: Operation returned empty result.");
   }
 
-  // Return final URI with API key for playback/download
   return `${finalVideo.uri}&key=${process.env.API_KEY}`;
 };

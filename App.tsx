@@ -26,7 +26,7 @@ const compressImage = (base64Str: string, maxWidth = 200): Promise<string> => {
       canvas.height = img.height * scale;
       const ctx = canvas.getContext('2d');
       ctx?.drawImage(img, 0, 0, canvas.width, canvas.height);
-      resolve(canvas.toDataURL('image/jpeg', 0.6)); // 使用较低质量的 JPEG 缩略图
+      resolve(canvas.toDataURL('image/jpeg', 0.6));
     };
     img.onerror = () => resolve('');
   });
@@ -64,7 +64,13 @@ const App: React.FC = () => {
   const handleError = (err: any) => {
     console.error(err);
     const message = err instanceof Error ? err.message : String(err);
-    setError(message || "未知错误");
+    
+    // 针对 429 频率限制进行特殊 UI 处理
+    if (message.includes("429") || message.includes("RESOURCE_EXHAUSTED")) {
+      setError("API 调用频率已达上限。请等待约 1 分钟后重试，或检查您的 Google Cloud 计费计划。");
+    } else {
+      setError(message || "未知错误");
+    }
     setState(AppState.IDLE);
   };
 
@@ -91,7 +97,6 @@ const App: React.FC = () => {
   };
 
   const saveToHistory = async (prompts: ProductPrompt[], currentAnalysis: ProductAnalysis) => {
-    // 压缩封面图以节省空间
     const originalRef = images.find(i => i.type === 'image')?.data || images[0]?.data || '';
     const thumbnail = originalRef ? await compressImage(originalRef) : '';
 
@@ -99,19 +104,18 @@ const App: React.FC = () => {
       id: Math.random().toString(36).substr(2, 9),
       timestamp: Date.now(),
       productName: productName || '未命名产品',
-      referenceImage: thumbnail, // 仅存储缩略图
+      referenceImage: thumbnail,
       prompts: JSON.parse(JSON.stringify(prompts)),
       analysis: JSON.parse(JSON.stringify(currentAnalysis))
     };
 
-    const updated = [newRecord, ...history].slice(0, 12); // 限制历史记录为12条
+    const updated = [newRecord, ...history].slice(0, 12);
     setHistory(updated);
 
     try {
       localStorage.setItem('storyboard_history', JSON.stringify(updated));
     } catch (e) {
-      console.warn("存储空间依然不足，尝试进一步清理", e);
-      // 如果报错，只保留最近3条或清空部分
+      console.warn("存储空间依然不足", e);
       localStorage.setItem('storyboard_history', JSON.stringify(updated.slice(0, 3)));
     }
   };
@@ -209,13 +213,13 @@ const App: React.FC = () => {
     if (mode === 'grid') {
       referenceVisual = gridImages[setIdx] || "";
       if (!referenceVisual) { 
-        setError("请先生成分镜大图以锁定产品结构一致性。若想直接生成，请点击‘直接生成’按钮。"); 
+        setError("请先生成分镜大图以锁定产品结构一致性。"); 
         return; 
       }
     } else {
       const firstImg = images.find(img => img.type === 'image');
       if (!firstImg) {
-        setError("流水线中没有可用的产品图片资产。请先上传产品图片。");
+        setError("流水线中没有可用的产品图片资产。");
         return;
       }
       referenceVisual = firstImg.data;
@@ -224,11 +228,7 @@ const App: React.FC = () => {
     if (!scriptText) { setError("分镜脚本不能为空。"); return; }
 
     const profile = analysis?.globalProfile;
-    const finalPrompt = `Final commercial video following this script: ${scriptText}. 
-    Product Core Structure: ${profile?.structure || ''}.
-    Product Fine Details: ${profile?.details || ''}. 
-    Motion Rules: ${profile?.motion || ''}.
-    STRICT REQUIREMENT: The product in this video MUST maintain 100% structural and detail consistency.`;
+    const finalPrompt = `Final commercial video following this script: ${scriptText}. Product Core Structure: ${profile?.structure || ''}.`;
 
     setSetVideoLoading(prev => ({ ...prev, [setIdx]: true }));
     try {
