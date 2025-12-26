@@ -2,18 +2,23 @@
 export interface IndividualAnalysis {
   id: string;
   description: string;
-  motionDynamics?: string;
-  keyframes?: string[];
 }
 
 export interface VideoResult {
   url: string;
   id: string;
+  status: 'pending' | 'generating' | 'completed' | 'failed';
+}
+
+export interface ShotDetail {
+  cameraAngle: string;
+  lighting: string;
+  description: string;
 }
 
 export interface ProductPrompt {
   instruction: string;
-  shots: string[];
+  shots: ShotDetail[];
 }
 
 export interface HistoryRecord {
@@ -28,10 +33,11 @@ export interface HistoryRecord {
 export interface ProductAnalysis {
   individualAnalyses: IndividualAnalysis[];
   globalProfile: {
-    details: string;      // 产品细节与材质
-    features: string;     // 功能与卖点
-    audience: string;     // 目标受众与品牌调性
-    interaction: string;  // 使用逻辑与交互动作
+    structure: string;  // 产品结构
+    details: string;    // 产品细节
+    audience: string;   // 受众群体
+    scenarios: string;  // 使用场景
+    motion: string;     // 运动/动态规律
   };
 }
 
