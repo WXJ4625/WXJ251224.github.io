@@ -1,6 +1,6 @@
 
 import { GoogleGenAI, Type, GenerateContentResponse } from "@google/genai";
-import { ProductAnalysis, IndividualAnalysis, SceneType, ProductPrompt } from "../types";
+import { ProductAnalysis, IndividualAnalysis, SceneType, ProductPrompt, VideoResolution, VideoAspectRatio } from "../types";
 
 /**
  * 分析每一张参考图或视频的具体内容
@@ -155,16 +155,19 @@ export const generateStoryboards = async (
   const model = 'gemini-3-pro-preview';
 
   const systemInstruction = `你是一个专业的产品分镜策划师。你擅长根据产品细节，在指定的${sceneType}场景下生成电影级、高凝聚力的3x3网格分镜。
-  你必须严格遵循产品基因：
+  
+  产品基因限制（必须严格遵守）：
   - 结构一致性：${profile.structure}
   - 细节表现：${profile.details}
   - 运动/方向一致性：${profile.motion}（重要：确保所有动态镜头的运动方向、旋转逻辑与此处描述一致）
-  - 受众呼应：${profile.audience}
-  - 场景契合：${profile.scenarios}
   
-  重要指令：
+  人物设定（重要）：
+  - 默认模特设定：除非用户另有说明，所有模特均默认为“欧美模特 (Western Models)”，外貌具有时尚商业感。
+  
+  分镜生成准则：
   1. 为每个镜头分配具体的摄像机角度 and 光影环境。
-  2. 详细描述模特（如有）与产品的互动，互动动作应符合${profile.motion}中的逻辑。`;
+  2. 详细描述模特与产品的互动，互动动作应符合${profile.motion}中的逻辑。
+  3. 保持产品物理结构在不同镜头间的高度一致。`;
 
   const prompt = `
     任务：为产品“${productName}”生成 ${quantity} 份独立的分镜方案。
@@ -226,7 +229,7 @@ export const generateGridImage = async (prompt: string, referenceImageBase64?: s
 
   contents.push({ text: `Generate a high-end commercial 3x3 storyboard grid image. 
   PROMPT: ${prompt}. 
-  Ensure strict consistency in product structure and motion logic.` });
+  Models should be high-end Western models. Ensure 100% structural consistency for the product based on the reference if provided.` });
 
   const response = await ai.models.generateContent({
     model: 'gemini-2.5-flash-image',
@@ -251,28 +254,35 @@ export const generateGridImage = async (prompt: string, referenceImageBase64?: s
 };
 
 /**
- * 生成商业视频 (Veo)
+ * 生成商业视频 (Veo) 且支持延长时长
  */
-export const generateVideo = async (
+export const generateVideoWithExtension = async (
   prompt: string, 
   referenceImageBase64: string, 
-  resolution: '720p' | '1080p' = '1080p'
+  config: {
+    resolution: VideoResolution,
+    aspectRatio: VideoAspectRatio,
+    targetDuration: number // 5, 12, 19, 26, 33 (multiples of 7 + start)
+  },
+  onStatusChange?: (msg: string) => void
 ): Promise<string> => {
   const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-  
   const imageData = referenceImageBase64.split(',')[1];
   
+  onStatusChange?.(`正在初始化 Veo 渲染引擎 (${config.resolution})...`);
+
+  // Step 1: Initial Generation
   let operation = await ai.models.generateVideos({
     model: 'veo-3.1-fast-generate-preview',
-    prompt: `Cinematic commercial video for a product. High production value. Smooth motion. Maintain product structural consistency. ${prompt}`,
+    prompt: `High-end commercial video. High production value. Smooth cinematic motion. Western models. Maintain product consistency. ${prompt}`,
     image: {
       imageBytes: imageData,
       mimeType: 'image/jpeg',
     },
     config: {
       numberOfVideos: 1,
-      resolution: resolution,
-      aspectRatio: '16:9'
+      resolution: config.resolution,
+      aspectRatio: config.aspectRatio
     }
   });
 
@@ -281,9 +291,43 @@ export const generateVideo = async (
     operation = await ai.operations.getVideosOperation({ operation: operation });
   }
 
-  const downloadLink = operation.response?.generatedVideos?.[0]?.video?.uri;
+  let finalVideo = operation.response?.generatedVideos?.[0]?.video;
+  if (!finalVideo) throw new Error("Video generation failed at initial stage.");
+
+  // Step 2: Extensions (Only works for 720p)
+  if (config.targetDuration > 7 && config.resolution === '720p') {
+    const extensionsNeeded = Math.floor((config.targetDuration - 5) / 7);
+    for (let i = 0; i < extensionsNeeded; i++) {
+      onStatusChange?.(`正在延长视频时长 (${i + 1}/${extensionsNeeded})...`);
+      let extOp = await ai.models.generateVideos({
+        model: 'veo-3.1-generate-preview',
+        prompt: `Continue the previous scene naturally, maintain product and model consistency. ${prompt}`,
+        video: finalVideo,
+        config: {
+          numberOfVideos: 1,
+          resolution: '720p',
+          aspectRatio: config.aspectRatio
+        }
+      });
+
+      while (!extOp.done) {
+        await new Promise(resolve => setTimeout(resolve, 10000));
+        extOp = await ai.operations.getVideosOperation({ operation: extOp });
+      }
+      
+      const newVideo = extOp.response?.generatedVideos?.[0]?.video;
+      if (newVideo) {
+        finalVideo = newVideo;
+      } else {
+        break; // Extension failed, return what we have
+      }
+    }
+  }
+
+  const downloadLink = finalVideo.uri;
   if (!downloadLink) throw new Error("Video generation returned no download link.");
 
+  onStatusChange?.("正在同步媒体资源...");
   const response = await fetch(`${downloadLink}&key=${process.env.API_KEY}`);
   const blob = await response.blob();
   return URL.createObjectURL(blob);

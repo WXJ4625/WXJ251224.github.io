@@ -4,12 +4,6 @@ export interface IndividualAnalysis {
   description: string;
 }
 
-export interface VideoResult {
-  url: string;
-  id: string;
-  status: 'pending' | 'generating' | 'completed' | 'failed';
-}
-
 export interface ShotDetail {
   cameraAngle: string;
   lighting: string;
@@ -42,6 +36,8 @@ export interface ProductAnalysis {
 }
 
 export type SceneType = 'Studio' | 'Lifestyle' | 'Outdoor' | 'Tech/Laboratory' | 'Cinematic' | 'Minimalist';
+export type VideoResolution = '720p' | '1080p';
+export type VideoAspectRatio = '16:9' | '9:16';
 
 export enum AppState {
   IDLE = 'IDLE',
