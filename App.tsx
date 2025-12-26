@@ -2,7 +2,7 @@
 import React, { useState, useEffect } from 'react';
 import { 
   Camera, Trash2, Search, Loader2, Zap, Copy, ImageIcon, Sparkles, LayoutGrid, FileDown, 
-  Package, X, History, ChevronRight, Box, AlertCircle, Edit3, Scan, Users, MapPin, CheckCircle2, Save, Download, Video, Play, Activity, Clock, Layers, Maximize2, ChevronDown, ChevronUp, Monitor, ZapOff
+  Package, X, History, ChevronRight, Box, AlertCircle, Edit3, Scan, Users, MapPin, CheckCircle2, Save, Download, Video, Play, Activity, Clock, Layers, Maximize2, ChevronDown, ChevronUp, Monitor, ZapOff, Trash
 } from 'lucide-react';
 import { AppState, ProductAnalysis, IndividualAnalysis, SceneType, HistoryRecord, ProductPrompt, VideoResolution, VideoAspectRatio } from './types';
 import { analyzeIndividualImages, synthesizeProductProfile, generateStoryboards, generateProductProfileFromText, generateGridImage, generateVideoWithExtension } from './services/geminiService';
@@ -13,6 +13,24 @@ const DURATION_OPTIONS = [
   { label: '12-14s (延长)', value: 12 },
   { label: '19-21s (中长)', value: 19 }
 ];
+
+// 辅助函数：压缩图片以节省存储空间
+const compressImage = (base64Str: string, maxWidth = 200): Promise<string> => {
+  return new Promise((resolve) => {
+    const img = new window.Image();
+    img.src = base64Str;
+    img.onload = () => {
+      const canvas = document.createElement('canvas');
+      const scale = maxWidth / img.width;
+      canvas.width = maxWidth;
+      canvas.height = img.height * scale;
+      const ctx = canvas.getContext('2d');
+      ctx?.drawImage(img, 0, 0, canvas.width, canvas.height);
+      resolve(canvas.toDataURL('image/jpeg', 0.6)); // 使用较低质量的 JPEG 缩略图
+    };
+    img.onerror = () => resolve('');
+  });
+};
 
 const App: React.FC = () => {
   const [state, setState] = useState<AppState>(AppState.IDLE);
@@ -28,7 +46,6 @@ const App: React.FC = () => {
   const [gridImages, setGridImages] = useState<Record<number, string>>({});
   const [imageLoading, setImageLoading] = useState<Record<number, boolean>>({});
   
-  // Track final videos per set
   const [setVideoUrls, setSetVideoUrls] = useState<Record<number, string>>({});
   const [setVideoLoading, setSetVideoLoading] = useState<Record<number, boolean>>({});
   const [setVideoStatus, setSetVideoStatus] = useState<Record<number, string>>({});
@@ -60,7 +77,7 @@ const App: React.FC = () => {
           setHistory(parsed as HistoryRecord[]);
         }
       } catch (e: any) {
-        console.error(e);
+        console.error("加载历史记录失败", e);
       }
     }
   }, []);
@@ -73,18 +90,37 @@ const App: React.FC = () => {
     return text;
   };
 
-  const saveToHistory = (prompts: ProductPrompt[], currentAnalysis: ProductAnalysis) => {
+  const saveToHistory = async (prompts: ProductPrompt[], currentAnalysis: ProductAnalysis) => {
+    // 压缩封面图以节省空间
+    const originalRef = images.find(i => i.type === 'image')?.data || images[0]?.data || '';
+    const thumbnail = originalRef ? await compressImage(originalRef) : '';
+
     const newRecord: HistoryRecord = {
       id: Math.random().toString(36).substr(2, 9),
       timestamp: Date.now(),
       productName: productName || '未命名产品',
-      referenceImage: images.find(i => i.type === 'image')?.data || images[0]?.data || '',
+      referenceImage: thumbnail, // 仅存储缩略图
       prompts: JSON.parse(JSON.stringify(prompts)),
       analysis: JSON.parse(JSON.stringify(currentAnalysis))
     };
-    const updated = [newRecord, ...history].slice(0, 50);
+
+    const updated = [newRecord, ...history].slice(0, 12); // 限制历史记录为12条
     setHistory(updated);
-    localStorage.setItem('storyboard_history', JSON.stringify(updated));
+
+    try {
+      localStorage.setItem('storyboard_history', JSON.stringify(updated));
+    } catch (e) {
+      console.warn("存储空间依然不足，尝试进一步清理", e);
+      // 如果报错，只保留最近3条或清空部分
+      localStorage.setItem('storyboard_history', JSON.stringify(updated.slice(0, 3)));
+    }
+  };
+
+  const clearHistory = () => {
+    if (window.confirm("确定要清空所有历史记录吗？")) {
+      setHistory([]);
+      localStorage.removeItem('storyboard_history');
+    }
   };
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -112,7 +148,8 @@ const App: React.FC = () => {
     try {
       const raw = await analyzeIndividualImages(images, productName);
       const profile = await synthesizeProductProfile(raw, productName);
-      setAnalysis({ individualAnalyses: raw, globalProfile: profile });
+      const newAnalysis = { individualAnalyses: raw, globalProfile: profile };
+      setAnalysis(newAnalysis);
       setState(AppState.EDITING_GLOBAL);
     } catch (err: any) { handleError(err); }
   };
@@ -122,7 +159,8 @@ const App: React.FC = () => {
     setState(AppState.ANALYZING_GLOBAL);
     try {
       const profile = await generateProductProfileFromText(productName);
-      setAnalysis({ individualAnalyses: [], globalProfile: profile });
+      const newAnalysis = { individualAnalyses: [], globalProfile: profile };
+      setAnalysis(newAnalysis);
       setState(AppState.EDITING_GLOBAL);
     } catch (err: any) { handleError(err); }
   };
@@ -134,7 +172,7 @@ const App: React.FC = () => {
       const results = await generateStoryboards(analysis.globalProfile, productName, promptCount, language, sceneType);
       setGeneratedPrompts(results);
       setEditablePrompts(results.map(p => formatPromptForEditing(p)));
-      saveToHistory(results, analysis);
+      await saveToHistory(results, analysis);
       setState(AppState.COMPLETED);
     } catch (err: any) { handleError(err); }
   };
@@ -158,7 +196,6 @@ const App: React.FC = () => {
     } catch (err: any) { handleError(err); } finally { setImageLoading(prev => ({ ...prev, [idx]: false })); }
   };
 
-  // Improved handleGenerateFullVideo to support direct image or grid image
   const handleGenerateFullVideo = async (setIdx: number, mode: 'grid' | 'direct' = 'grid') => {
     const aistudio = (window as any).aistudio;
     const hasKey = (await aistudio.hasSelectedApiKey()) as boolean;
@@ -172,11 +209,10 @@ const App: React.FC = () => {
     if (mode === 'grid') {
       referenceVisual = gridImages[setIdx] || "";
       if (!referenceVisual) { 
-        setError("请先生成分镜大图以锁定产品结构一致性. 若想直接生成，请点击‘直接生成’按钮。"); 
+        setError("请先生成分镜大图以锁定产品结构一致性。若想直接生成，请点击‘直接生成’按钮。"); 
         return; 
       }
     } else {
-      // Direct mode: use first available image reference
       const firstImg = images.find(img => img.type === 'image');
       if (!firstImg) {
         setError("流水线中没有可用的产品图片资产。请先上传产品图片。");
@@ -192,8 +228,7 @@ const App: React.FC = () => {
     Product Core Structure: ${profile?.structure || ''}.
     Product Fine Details: ${profile?.details || ''}. 
     Motion Rules: ${profile?.motion || ''}.
-    STRICT REQUIREMENT: The product in this video MUST maintain 100% structural and detail consistency based on the reference image at every frame. 
-    The motion trajectory must be smooth and professional. Fast-paced cinematic montage.`;
+    STRICT REQUIREMENT: The product in this video MUST maintain 100% structural and detail consistency.`;
 
     setSetVideoLoading(prev => ({ ...prev, [setIdx]: true }));
     try {
@@ -222,14 +257,12 @@ const App: React.FC = () => {
     document.body.removeChild(link);
   };
 
-  // Fixed Error in file App.tsx on line 227: Argument of type 'unknown' is not assignable to parameter of type 'string'
   const downloadAllImages = () => {
     Object.entries(gridImages).forEach(([idx, url]) => {
       downloadFile(url as string, `${productName}_grid_${idx}.png`);
     });
   };
 
-  // Fixed Error in file App.tsx on line 233: Argument of type 'unknown' is not assignable to parameter of type 'string'
   const downloadAllVideos = () => {
     Object.entries(setVideoUrls).forEach(([idx, url]) => {
       downloadFile(url as string, `${productName}_video_${idx}.mp4`);
@@ -562,7 +595,10 @@ const App: React.FC = () => {
            <div className="bg-white w-full max-w-3xl max-h-[80vh] rounded-[4rem] overflow-hidden flex flex-col shadow-2xl animate-in slide-in-from-bottom-10 duration-500">
               <div className="p-10 border-b flex justify-between items-center bg-slate-50/50">
                  <h3 className="text-2xl font-black flex items-center gap-4"><History className="w-7 h-7 text-indigo-600" /> 方案历史</h3>
-                 <button onClick={() => setShowHistory(false)} className="p-4 border-2 rounded-2xl hover:bg-slate-100 transition-all shadow-sm"><X className="w-6 h-6 text-slate-400" /></button>
+                 <div className="flex gap-4">
+                    <button onClick={clearHistory} className="p-4 bg-red-50 text-red-500 rounded-2xl hover:bg-red-100 transition-all shadow-sm flex items-center gap-2 font-black text-xs uppercase tracking-widest"><Trash className="w-4 h-4" /> 清空全部</button>
+                    <button onClick={() => setShowHistory(false)} className="p-4 border-2 rounded-2xl hover:bg-slate-100 transition-all shadow-sm"><X className="w-6 h-6 text-slate-400" /></button>
+                 </div>
               </div>
               <div className="flex-1 overflow-y-auto p-10 space-y-6">
                  {history.length === 0 ? <p className="text-center py-24 text-slate-400 font-bold italic text-xl">暂无记录</p> : history.map(rec => (
@@ -596,7 +632,7 @@ const App: React.FC = () => {
       <footer className="fixed bottom-0 left-0 right-0 bg-white/95 backdrop-blur-3xl border-t py-6 px-16 flex justify-between items-center z-[40]">
         <div className="flex items-center gap-5">
           <div className={`w-3.5 h-3.5 rounded-full ${state === AppState.IDLE ? 'bg-slate-300' : 'bg-indigo-500 animate-pulse'} shadow-sm`}></div>
-          <span className="text-[11px] font-black text-slate-900 uppercase tracking-[0.3em] italic">{Object.values(setVideoLoading).some(v => v) ? 'Veo 正在进行首尾结构一致性渲染...' : `流水线状态: ${state}`}</span>
+          <span className="text-[11px] font-black text-slate-900 uppercase tracking-[0.3em] italic">{Object.values(setVideoLoading).some(v => v) ? 'Veo 正在进行渲染...' : `流水线状态: ${state}`}</span>
         </div>
         <div className="flex items-center gap-8">
           <div className="px-6 py-2.5 bg-indigo-50 border-2 border-indigo-100 rounded-full text-[10px] font-black uppercase text-indigo-600 tracking-tighter italic flex items-center gap-3">
