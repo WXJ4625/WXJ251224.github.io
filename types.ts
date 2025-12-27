@@ -38,6 +38,7 @@ export interface ProductAnalysis {
 export type SceneType = 'Studio' | 'Lifestyle' | 'Outdoor' | 'Tech/Laboratory' | 'Cinematic' | 'Minimalist';
 export type VideoResolution = '720p' | '1080p';
 export type VideoAspectRatio = '16:9' | '9:16';
+export type VideoEngine = 'veo-3.1-fast-generate-preview' | 'veo-3.1-generate-preview';
 
 export enum AppState {
   IDLE = 'IDLE',

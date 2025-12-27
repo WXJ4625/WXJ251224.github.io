@@ -1,6 +1,6 @@
 
 import { GoogleGenAI, Type, GenerateContentResponse } from "@google/genai";
-import { ProductAnalysis, IndividualAnalysis, SceneType, ProductPrompt, VideoResolution, VideoAspectRatio } from "../types";
+import { ProductAnalysis, IndividualAnalysis, SceneType, ProductPrompt, VideoResolution, VideoAspectRatio, VideoEngine } from "../types";
 
 /**
  * 通用的重试包装函数，支持指数退避
@@ -13,52 +13,68 @@ async function withRetry<T>(fn: () => Promise<T>, maxRetries = 3, initialDelay =
     } catch (error: any) {
       lastError = error;
       const errorMsg = error?.message || "";
-      // 只有在 429 或 5xx 错误时才重试
       if (errorMsg.includes("429") || errorMsg.includes("RESOURCE_EXHAUSTED") || errorMsg.includes("500") || errorMsg.includes("503")) {
         const delay = initialDelay * Math.pow(2, i);
         console.warn(`检测到频率限制或服务器压力，将在 ${delay}ms 后进行第 ${i + 1} 次重试...`);
         await new Promise(resolve => setTimeout(resolve, delay));
         continue;
       }
-      throw error; // 其他错误直接抛出
+      throw error;
     }
   }
   throw lastError;
 }
 
 /**
- * 分析每一张参考图或视频的具体内容
+ * 使用 Gemini 3 Pro 润色分镜脚本，生成专为 Veo 优化的“导演指令”
  */
+export const refineVideoPromptWithGemini = async (
+  script: string,
+  profile: ProductAnalysis['globalProfile'],
+  productName: string
+): Promise<string> => {
+  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+  const model = 'gemini-3-pro-preview';
+
+  const prompt = `你是一名世界级的商业视频导演。请将以下【分镜脚本】和【产品基因】转化成一段专为 Veo 3.1 视频生成模型设计的“高保真导演指令”。
+  
+  产品：${productName}
+  结构特征：${profile.structure}
+  材质细节：${profile.details}
+  分镜脚本：${script}
+
+  要求：
+  1. 描述必须包含：光影动态（如：God rays, soft bokeh）、材质表现（如：Metalic sheen, micro-texture）、镜头平滑运动（如：Cinematic dolly zoom, macro pan）。
+  2. 强调“结构一致性”：确保每一秒钟产品的物理形态都绝对稳定。
+  3. 指令必须用【英文】输出，以获得最佳模型理解度。
+  4. 只输出指令文本，不需要任何解释。`;
+
+  const response: GenerateContentResponse = await withRetry(() => ai.models.generateContent({
+    model,
+    contents: prompt
+  }));
+
+  return response.text || script;
+};
+
 export const analyzeIndividualImages = async (
   images: {id: string, data: string, type: 'image' | 'video'}[],
   productName: string
 ): Promise<IndividualAnalysis[]> => {
   const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
   const model = 'gemini-3-flash-preview';
-
   const results: IndividualAnalysis[] = [];
-
   for (let i = 0; i < images.length; i++) {
     const item = images[i];
     const isVideo = item.type === 'video';
-    
     const mediaPart = {
       inlineData: {
         data: item.data.split(',')[1],
         mimeType: isVideo ? 'video/mp4' : 'image/jpeg'
       }
     };
-
-    const prompt = `你正在分析产品“${productName}”的参考${isVideo ? '视频' : '图'}。请从以下维度进行深度分析：
-    1. 产品结构 (Structure): 物理架构、组件关系、核心几何特征、每个部件的连接方式。
-    2. 产品细节 (Details): 材质纹理、Logo位置、精致的微小设计细节、高光表现、颜色梯度。
-    3. 产品使用 (Usage): 交互方式、功能演示逻辑、人机工程。
-    4. ${isVideo ? '运动规律 (Motion): 详细分析视频中的旋转方向、位移轨迹、组件开合的物理节奏。' : '静态动势: 分析静态图中暗示的运动方向或视觉重心。'}
-    
-    输出格式为 JSON: { "description": "..." }`;
-
+    const prompt = `分析产品“${productName}”的参考${isVideo ? '视频' : '图'}结构、细节、运动规律等。输出JSON: { "description": "..." }`;
     try {
-      // Fix: Explicitly typing the response to avoid 'unknown' type errors
       const response: GenerateContentResponse = await withRetry(() => ai.models.generateContent({
         model,
         contents: { parts: [mediaPart, { text: prompt }] },
@@ -66,57 +82,29 @@ export const analyzeIndividualImages = async (
           responseMimeType: "application/json",
           responseSchema: {
             type: Type.OBJECT,
-            properties: {
-              description: { type: Type.STRING }
-            },
+            properties: { description: { type: Type.STRING } },
             required: ["description"]
           }
         }
       }));
-      // Fix: response.text is a property, not a method
       const parsed = JSON.parse(response.text || '{"description": "无法识别"}');
       results.push({ id: item.id, description: String(parsed.description || "无法识别") });
-      
-      // 在处理多个图片时，人为增加一点间隔，减少并发压力
-      if (images.length > 1 && i < images.length - 1) {
-        await new Promise(resolve => setTimeout(resolve, 1000));
-      }
+      if (images.length > 1 && i < images.length - 1) await new Promise(resolve => setTimeout(resolve, 1000));
     } catch (e) {
-      console.error("Individual image analysis failed", e);
       results.push({ id: item.id, description: "分析失败" });
     }
   }
-
   return results;
 };
 
-/**
- * 综合所有参考图分析，推导出全局产品属性
- */
 export const synthesizeProductProfile = async (
   individualAnalyses: IndividualAnalysis[],
   productName: string
 ): Promise<ProductAnalysis['globalProfile']> => {
   const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
   const model = 'gemini-3-flash-preview';
-
   const context = individualAnalyses.map((a, i) => `参考分析 ${i+1}: ${a.description}`).join('\n');
-  const prompt = `基于以下对产品“${productName}”的参考分析，请综合提炼出核心产品基因。
-  确保提炼的信息能够让视频模型精准还原产品的物理属性，保持 100% 的结构一致性。
-
-  按以下 5 个维度输出：
-  1. 产品结构 (Structure): 产品的核心形体、组件构成。
-  2. 产品细节 (Details): 材质细节、Logo、微小特征。
-  3. 受众群体 (Audience): 核心目标用户与品牌调性。
-  4. 使用场景 (Scenarios): 典型应用环境。
-  5. 运动规律 (Motion): 提炼出产品在运动时的典型方向、旋转轴心。
-
-  上下文：
-  ${context}
-  
-  输出格式为 JSON。`;
-
-  // Fix: Explicitly typing the response to avoid 'unknown' type errors
+  const prompt = `基于以下对产品“${productName}”的参考分析，提炼核心产品基因(Structure, Details, Audience, Scenarios, Motion)。输出JSON。 上下文：${context}`;
   const response: GenerateContentResponse = await withRetry(() => ai.models.generateContent({
     model,
     contents: prompt,
@@ -135,25 +123,15 @@ export const synthesizeProductProfile = async (
       }
     }
   }));
-
-  // Fix: response.text is a property
   return JSON.parse(response.text || '{}') as ProductAnalysis['globalProfile'];
 };
 
-/**
- * 根据产品名称直接生成档案
- */
 export const generateProductProfileFromText = async (
   productName: string
 ): Promise<ProductAnalysis['globalProfile']> => {
   const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
   const model = 'gemini-3-flash-preview';
-
-  const prompt = `你是一个专业的产品策划。请基于产品名称“${productName}”提供一份详细的产品基因档案。
-  按以下 5 个维度输出：结构 (Structure)、细节 (Details)、受众 (Audience)、场景 (Scenarios)、运动规律 (Motion)。
-  输出格式为 JSON。`;
-
-  // Fix: Explicitly typing the response to avoid 'unknown' type errors
+  const prompt = `基于产品名称“${productName}”提供详细的产品基因档案(Structure, Details, Audience, Scenarios, Motion)。输出JSON。`;
   const response: GenerateContentResponse = await withRetry(() => ai.models.generateContent({
     model,
     contents: prompt,
@@ -172,14 +150,9 @@ export const generateProductProfileFromText = async (
       }
     }
   }));
-
-  // Fix: response.text is a property
   return JSON.parse(response.text || '{}') as ProductAnalysis['globalProfile'];
 };
 
-/**
- * 根据综合档案生成多套分镜建议
- */
 export const generateStoryboards = async (
   profile: ProductAnalysis['globalProfile'], 
   productName: string,
@@ -189,27 +162,8 @@ export const generateStoryboards = async (
 ): Promise<ProductPrompt[]> => {
   const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
   const model = 'gemini-3-pro-preview';
-
-  const systemInstruction = `你是一个顶级商业分镜策划师。擅长在${sceneType}场景下生成电影级分镜。
-  
-  核心交付原则：
-  - 物理结构一致性：严格遵循 ${profile.structure}。
-  - 细节表现力：展现 ${profile.details}。
-  - 动态连贯性：运动必须符合 ${profile.motion}。
-  
-  分镜生成准则：
-  1. 为每个镜头分配摄像机角度 and 光影。
-  2. 保持产品高度一致性。
-  3. 每一段视频的首尾帧必须展示完整且一致的产品结构。`;
-
-  const prompt = `
-    任务：为产品“${productName}”策划 ${quantity} 套分镜。
-    每套包含 1 个全局指令 and 9 个镜头。
-    视觉风格: ${sceneType}
-    输出语言：${language === 'zh' ? '中文' : '英文'}。
-  `;
-
-  // Fix: Explicitly typing the response to avoid 'unknown' type errors
+  const systemInstruction = `你是一个顶级商业分镜策划师。擅长在${sceneType}场景下生成电影级分镜。遵循：${profile.structure}, ${profile.details}, ${profile.motion}。`;
+  const prompt = `任务：为“${productName}”策划 ${quantity} 套分镜。每套包含1个全局指令和9个镜头。语言：${language}。`;
   const response: GenerateContentResponse = await withRetry(() => ai.models.generateContent({
     model,
     contents: prompt,
@@ -240,82 +194,47 @@ export const generateStoryboards = async (
       }
     }
   }));
-
-  // Fix: response.text is a property
   return JSON.parse(response.text || '[]') as ProductPrompt[];
 };
 
-/**
- * 生成 3x3 预览图
- */
 export const generateGridImage = async (prompt: string, referenceImageBase64?: string): Promise<string> => {
   const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-  
   const contentsParts: any[] = [];
-  
   if (referenceImageBase64) {
-    contentsParts.push({
-      inlineData: {
-        data: referenceImageBase64.split(',')[1],
-        mimeType: 'image/jpeg'
-      }
-    });
+    contentsParts.push({ inlineData: { data: referenceImageBase64.split(',')[1], mimeType: 'image/jpeg' } });
   }
-
-  contentsParts.push({ text: `Create a professional 3x3 storyboard grid image. 
-  PROMPT: ${prompt}. 
-  Western models. Cinematic lighting. 
-  MANDATORY: Maintain 100% product structural and detail consistency across all grid cells based on the provided reference.` });
-
-  // Fix: Explicitly typing the response to avoid 'unknown' type errors
+  contentsParts.push({ text: `Create a professional 3x3 storyboard grid image. PROMPT: ${prompt}. Cinematic lighting. Consistent product based on reference.` });
   const response: GenerateContentResponse = await withRetry(() => ai.models.generateContent({
     model: 'gemini-2.5-flash-image',
     contents: { parts: contentsParts },
-    config: {
-      imageConfig: {
-        aspectRatio: "16:9"
-      }
-    }
+    config: { imageConfig: { aspectRatio: "16:9" } }
   }));
-
-  // Fix: Safe access to candidates and iteration over parts to find inlineData
   const part = response.candidates?.[0]?.content?.parts.find(p => p.inlineData);
   if (!part?.inlineData) throw new Error("Image generation failed");
   return `data:image/png;base64,${part.inlineData.data}`;
 };
 
-/**
- * 渲染分镜视频成片
- */
 export const generateVideoWithExtension = async (
   prompt: string, 
   referenceImageBase64: string, 
   config: {
     resolution: VideoResolution,
     aspectRatio: VideoAspectRatio,
-    targetDuration: number
+    targetDuration: number,
+    engine: VideoEngine
   },
   onStatusChange?: (msg: string) => void
 ): Promise<string> => {
   const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
   const imageData = referenceImageBase64.includes(',') ? referenceImageBase64.split(',')[1] : referenceImageBase64;
   
-  onStatusChange?.(`启动 Veo 渲染流水线...`);
+  onStatusChange?.(`启动 [${config.engine.includes('fast') ? 'Fast' : 'Pro'}] 渲染引擎...`);
 
-  // Fix: Explicitly typing the operation to avoid 'unknown' type errors
   let operation: any = await withRetry(() => ai.models.generateVideos({
-    model: 'veo-3.1-fast-generate-preview',
-    prompt: `Industrial high-end commercial video. 
-    Product Consistency: The product in this video MUST exactly match the provided reference image in structure, color, and texture at ALL TIMES. Script: ${prompt}`,
-    image: {
-      imageBytes: imageData,
-      mimeType: 'image/jpeg',
-    },
-    config: {
-      numberOfVideos: 1,
-      resolution: config.resolution,
-      aspectRatio: config.aspectRatio
-    }
+    model: config.engine,
+    prompt: `Industrial high-end commercial video. 100% Product Consistency. ${prompt}`,
+    image: { imageBytes: imageData, mimeType: 'image/jpeg' },
+    config: { numberOfVideos: 1, resolution: config.resolution, aspectRatio: config.aspectRatio }
   }));
 
   while (!operation.done) {
@@ -326,24 +245,17 @@ export const generateVideoWithExtension = async (
 
   let finalVideo = operation.response?.generatedVideos?.[0]?.video;
 
-  // Extension logic
   if (config.targetDuration > 5) {
     onStatusChange?.(`检测到延展需求，正在续写视频...`);
     const rounds = Math.ceil((config.targetDuration - 5) / 7);
-    
     for (let i = 0; i < rounds; i++) {
       onStatusChange?.(`正在进行第 ${i + 1}/${rounds} 阶段延展 (每轮 +7s)...`);
       operation = await withRetry(() => ai.models.generateVideos({
         model: 'veo-3.1-generate-preview',
         prompt: `Continue the scene smoothly while maintaining product structural consistency. ${prompt}`,
         video: finalVideo,
-        config: {
-          numberOfVideos: 1,
-          resolution: '720p',
-          aspectRatio: config.aspectRatio
-        }
+        config: { numberOfVideos: 1, resolution: '720p', aspectRatio: config.aspectRatio }
       }));
-
       while (!operation.done) {
         await new Promise(resolve => setTimeout(resolve, 10000));
         operation = await ai.operations.getVideosOperation({operation: operation});
@@ -352,9 +264,6 @@ export const generateVideoWithExtension = async (
     }
   }
 
-  if (!finalVideo?.uri) {
-    throw new Error("Video generation failed: Operation returned empty result.");
-  }
-
+  if (!finalVideo?.uri) throw new Error("Video generation failed: Operation returned empty result.");
   return `${finalVideo.uri}&key=${process.env.API_KEY}`;
 };
